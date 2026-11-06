@@ -18,6 +18,7 @@ data class AlbumView(
     val commandId: String,
     val status: ItemStatus,
     val error: String?,
+    val title: String = "",
 ) {
     fun blocksRemoval(): Boolean = status != ItemStatus.FAILED
 }
@@ -39,6 +40,25 @@ data class LibraryView(
     val pendingLibraryRoot: String?,
     val libraryReady: Boolean,
     val folders: List<FolderView>,
+)
+
+fun LibraryView.withKnownTitles(titles: Map<String, String>): LibraryView = copy(
+    folders = folders.map { folder ->
+        folder.copy(
+            tracks = folder.tracks.map { track ->
+                val better = titles[track.videoId]
+                if (!better.isNullOrBlank() && (track.title.isBlank() || track.title == track.videoId)) {
+                    track.copy(title = better)
+                } else {
+                    track
+                }
+            },
+            albums = folder.albums.map { album ->
+                val better = titles[album.playlistId]
+                if (!better.isNullOrBlank() && album.title.isBlank()) album.copy(title = better) else album
+            },
+        )
+    },
 )
 
 fun merge(commands: List<Command>, state: LibraryState): LibraryView {

@@ -12,10 +12,15 @@ sealed class AudioDownloader
 
     public bool FfmpegExists => File.Exists(_ffmpegPath);
 
-    public async Task<SavedAudio> DownloadVideoAsync(string videoId, string folderPath, CancellationToken cancellationToken)
+    public async Task<SavedAudio> DownloadVideoAsync(
+        string videoId,
+        string folderPath,
+        CancellationToken cancellationToken,
+        Action<string>? onTitle = null)
     {
         var youtube = new YoutubeClient();
         var video = await youtube.Videos.GetAsync(videoId, cancellationToken);
+        if (!string.IsNullOrWhiteSpace(video.Title)) onTitle?.Invoke(video.Title);
         var manifest = await youtube.Videos.Streams.GetManifestAsync(videoId, cancellationToken);
         var audio = manifest.GetAudioOnlyStreams().GetWithHighestBitrate()
             ?? throw new InvalidOperationException("YouTube has no audio stream for this video.");

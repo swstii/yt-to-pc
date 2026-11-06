@@ -299,7 +299,13 @@ sealed class QueueWorker
             var saved = await _downloader.DownloadVideoAsync(
                 video.VideoId,
                 Path.Combine(_settings.MusicPath, video.Folder),
-                cancellationToken);
+                cancellationToken,
+                title =>
+                {
+                    track.Title = title;
+                    Status = "Downloading " + title;
+                    Save(state);
+                });
             track.Title = saved.Title;
             track.FileName = saved.FileName;
             track.Status = "done";

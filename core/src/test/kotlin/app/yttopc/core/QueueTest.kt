@@ -220,6 +220,24 @@ class QueueTest {
         assertTrue(confirmed.libraryReady)
     }
 
+    @Test
+    fun aVideoIdTitleIsReplacedWhenTheRealNameIsKnown() {
+        val view = queue(
+            state = LibraryState(
+                folders = listOf(StateFolder("Opus", listOf(StateTrack("dQw4w9WgXcQ", "dQw4w9WgXcQ")))),
+            ),
+        ).view
+        val named = view.withKnownTitles(mapOf("dQw4w9WgXcQ" to "Never Gonna Give You Up"))
+        assertEquals("Never Gonna Give You Up", named.folders.single().tracks.single().title)
+        val saved = queue(
+            state = LibraryState(folders = listOf(StateFolder("Opus", listOf(StateTrack("dQw4w9WgXcQ", "Generate"))))),
+        ).view
+        assertEquals(
+            "Generate",
+            saved.withKnownTitles(mapOf("dQw4w9WgXcQ" to "Something else")).folders.single().tracks.single().title,
+        )
+    }
+
     private fun queue(commands: List<Command> = emptyList(), state: LibraryState = LibraryState()) = Queue(
         commands,
         state,

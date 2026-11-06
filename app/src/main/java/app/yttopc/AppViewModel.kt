@@ -8,6 +8,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import app.yttopc.core.LibraryView
 import app.yttopc.core.Queue
+import app.yttopc.core.withKnownTitles
 import app.yttopc.core.QueueResult
 import app.yttopc.core.ShareChoice
 import app.yttopc.data.DriveAuth
@@ -16,6 +17,7 @@ import app.yttopc.data.DriveFolder
 import app.yttopc.data.LoadedNotebook
 import app.yttopc.data.NeedsSignIn
 import app.yttopc.data.NotebookRepository
+import app.yttopc.data.YoutubeTitles
 import app.yttopc.data.await
 import com.google.android.gms.auth.api.identity.Identity
 import kotlinx.coroutines.Dispatchers
@@ -47,6 +49,8 @@ data class UiState(
 class AppViewModel(app: Application) : AndroidViewModel(app) {
     private val repository = NotebookRepository(app)
     private val backStack = ArrayDeque<Screen>()
+    private val knownTitles = mutableMapOf<String, String>()
+    private val missedTitles = mutableSetOf<String>()
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state
 
@@ -101,7 +105,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                             signedIn = true,
                             notebookChosen = true,
                             driveFolderName = folderName,
-                            library = Queue(loaded.commands, loaded.state).view,
+                            library = present(Queue(loaded.commands, loaded.state).view),
                         )
                     }
                 }
@@ -277,6 +281,30 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         submit("Queued for the laptop.", { it.enqueue(text, folder, choice) })
     }
 
+    private fun present(library: LibraryView): LibraryView {
+        val named = library.withKnownTitles(knownTitles)
+        resolveMissingTitles(named)
+        return named
+    }
+
+    private fun resolveMissingTitles(library: LibraryView) {
+        val ids = library.folders.flatMap { folder ->
+            folder.tracks.mapNotNull { track ->
+                track.videoId.takeIf { !it.startsWith("file:") && (track.title.isBlank() || track.title == it) }
+            } + folder.albums.mapNotNull { album ->
+                album.playlistId.takeIf { album.title.isBlank() }
+            }
+        }.distinct().filter { it !in knownTitles && it !in missedTitles }
+        if (ids.isEmpty()) return
+        viewModelScope.launch {
+            for (id in ids) {
+                val title = withContext(Dispatchers.IO) { YoutubeTitles.lookup(id) }
+                if (title.isNullOrBlank()) missedTitles += id else knownTitles[id] = title
+            }
+            _state.update { it.copy(library = it.library.withKnownTitles(knownTitles)) }
+        }
+    }
+
     private fun submit(success: String, action: (Queue) -> QueueResult) {
         if (_state.value.busy) return
         _state.update { it.copy(busy = true) }
@@ -294,7 +322,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                         withContext(Dispatchers.IO) { repository.append(token, result.command) }
                         val again = withContext(Dispatchers.IO) { repository.load(token) }
                         val library = if (again is LoadedNotebook.Ready) {
-                            Queue(again.commands, again.state).view
+                            present(Queue(again.commands, again.state).view)
                         } else {
                             _state.value.library
                         }

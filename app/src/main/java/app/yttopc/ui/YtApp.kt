@@ -14,12 +14,14 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.border
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -46,8 +48,12 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -155,7 +161,7 @@ private fun SetupScreen(
         if (!state.signedIn) {
             Text("Sign in to Google Drive", style = MaterialTheme.typography.headlineSmall, color = MaterialTheme.colorScheme.onBackground)
             Text(
-                "One sign-in lets this app update the queue folder in Drive. The laptop opens that same folder with Drive for desktop.",
+                "One sign-in lets this app update the queue folder in Drive. The laptop reads that same folder. Songs stay on the laptop.",
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             if (state.screen is Screen.Share) {
@@ -172,7 +178,7 @@ private fun SetupScreen(
         } else {
             Text("Choose the Drive folder", style = MaterialTheme.typography.headlineSmall, color = MaterialTheme.colorScheme.onBackground)
             Text(
-                "Create it here. It shows up in Drive, and on the laptop inside Drive for desktop. MP3s stay on the laptop disk.",
+                "Create it here. The laptop reads this folder from Drive. MP3s stay on the laptop disk.",
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             if (state.driveFolders.isEmpty()) {
@@ -239,9 +245,31 @@ private fun HomeScreen(
         ) {
             items(library.folders, key = { it.name }) { folder ->
                 Card(onClick = { open(Screen.Folder(folder.name)) }, modifier = Modifier.fillMaxWidth(), colors = panelColors()) {
-                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text(folder.name, style = MaterialTheme.typography.titleMedium)
-                        Text(folderSummary(folder), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Row(
+                        Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Box(
+                            Modifier
+                                .width(4.dp)
+                                .height(36.dp)
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(MaterialTheme.colorScheme.primary),
+                        )
+                        Column(Modifier.padding(start = 14.dp).weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(
+                                folder.name,
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                folderSummary(folder),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                     }
                 }
             }
@@ -295,10 +323,13 @@ private fun FolderScreen(
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("Paste a link into this folder") }
         }
-        items(folder.albums, key = { "album-${it.commandId}" }) { album ->
+        items(folder.albums.sortedBy { waitingFirst(it.status) }, key = { "album-${it.commandId}" }) { album ->
             AlbumRow(album, busy, onRetry = { model.retry(album.commandId) })
         }
-        items(folder.tracks, key = { "track-${it.videoId}-${it.commandId}" }) { track ->
+        items(
+            folder.tracks.sortedBy { waitingFirst(it.status) },
+            key = { "track-${it.videoId}-${it.commandId}" },
+        ) { track ->
             TrackRow(track, busy, onDelete = { pendingDelete = track }, onRetry = {
                 track.commandId?.let(model::retry)
             })
@@ -308,8 +339,12 @@ private fun FolderScreen(
                 OutlinedButton(onClick = { confirmRemove = true }, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
                     Text("Delete empty folder")
                 }
-            } else {
-                Text("A folder can be deleted when it has no songs and nothing queued.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            } else if (folder.tracks.isEmpty() && folder.albums.isEmpty()) {
+                Text(
+                    "This folder can be deleted when nothing is queued.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
             }
         }
     }
@@ -347,16 +382,27 @@ private fun FolderScreen(
 @Composable
 private fun TrackRow(track: TrackView, busy: Boolean, onDelete: () -> Unit, onRetry: () -> Unit) {
     Card(Modifier.fillMaxWidth(), colors = panelColors()) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(track.title, style = MaterialTheme.typography.titleMedium)
-            Text(trackLabel(track), color = MaterialTheme.colorScheme.onSurfaceVariant)
-            track.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (track.status == ItemStatus.FAILED && track.commandId != null && !track.deletePending) {
-                    TextButton(onClick = onRetry, enabled = !busy) { Text("Retry") }
-                }
-                if (!track.deletePending) {
-                    TextButton(onClick = onDelete, enabled = !busy) { Text("Delete") }
+        Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    track.title,
+                    Modifier.weight(1f),
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.width(8.dp))
+                StatusPill(trackLabel(track), track.status)
+            }
+            track.error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+            if ((track.status == ItemStatus.FAILED && track.commandId != null && !track.deletePending) || !track.deletePending) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (track.status == ItemStatus.FAILED && track.commandId != null && !track.deletePending) {
+                        TextButton(onClick = onRetry, enabled = !busy) { Text("Retry") }
+                    }
+                    if (!track.deletePending) {
+                        TextButton(onClick = onDelete, enabled = !busy) { Text("Delete") }
+                    }
                 }
             }
         }
@@ -366,10 +412,18 @@ private fun TrackRow(track: TrackView, busy: Boolean, onDelete: () -> Unit, onRe
 @Composable
 private fun AlbumRow(album: AlbumView, busy: Boolean, onRetry: () -> Unit) {
     Card(Modifier.fillMaxWidth(), colors = panelColors()) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text("Playlist", style = MaterialTheme.typography.titleMedium)
-            Text(album.playlistId, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text(album.status.label(), color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    album.title.ifBlank { "Playlist" },
+                    Modifier.weight(1f),
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.width(8.dp))
+                StatusPill(album.status.label(), album.status)
+            }
             album.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             if (album.status == ItemStatus.FAILED) {
                 TextButton(onClick = onRetry, enabled = !busy) { Text("Retry") }
@@ -414,16 +468,25 @@ private fun ShareScreen(
                 val picked = selected == folder.name
                 Card(
                     onClick = { selected = folder.name },
-                    modifier = Modifier.fillMaxWidth().then(
-                        if (picked) Modifier.border(1.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(16.dp)) else Modifier,
-                    ),
-                    colors = panelColors(),
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = if (picked) {
+                        CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.primaryContainer,
+                            contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                        )
+                    } else {
+                        panelColors()
+                    },
                 ) {
-                    Text(
-                        folder.name,
-                        Modifier.padding(16.dp),
-                        color = if (picked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
-                    )
+                    Row(
+                        Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(folder.name, Modifier.weight(1f), style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        if (picked) {
+                            Text("Selected", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                        }
+                    }
                 }
             }
         }
@@ -510,6 +573,32 @@ private fun folderSummary(folder: FolderView): String {
     val failed = folder.tracks.count { it.status == ItemStatus.FAILED } + folder.albums.count { it.status == ItemStatus.FAILED }
     if (failed > 0) parts += "$failed failed"
     return parts.joinToString(" · ").ifBlank { "Empty" }
+}
+
+private fun waitingFirst(status: ItemStatus) = when (status) {
+    ItemStatus.DOWNLOADING -> 0
+    ItemStatus.PENDING -> 1
+    ItemStatus.FAILED -> 2
+    else -> 3
+}
+
+@Composable
+private fun StatusPill(label: String, status: ItemStatus) {
+    val color = when (status) {
+        ItemStatus.PENDING, ItemStatus.DOWNLOADING -> MaterialTheme.colorScheme.primary
+        ItemStatus.FAILED -> MaterialTheme.colorScheme.error
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    Text(
+        label,
+        Modifier
+            .clip(RoundedCornerShape(999.dp))
+            .background(color.copy(alpha = 0.16f))
+            .padding(horizontal = 8.dp, vertical = 3.dp),
+        color = color,
+        style = MaterialTheme.typography.labelSmall,
+        maxLines = 1,
+    )
 }
 
 private fun trackLabel(track: TrackView): String {
