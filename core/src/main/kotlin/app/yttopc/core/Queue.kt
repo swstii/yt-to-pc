@@ -16,7 +16,7 @@ class Queue(
 ) {
     val view: LibraryView = merge(commands, state)
 
-    fun enqueue(sharedText: String, folder: String, choice: ShareChoice): QueueResult {
+    fun enqueue(sharedText: String, folder: String, choice: ShareChoice, resolvedTitle: String? = null): QueueResult {
         val target = when (val parsed = YoutubeLinks.parse(sharedText)) {
             is ParseResult.Found -> parsed.target
             ParseResult.NotALink -> return reject("That share does not contain a link.")
@@ -26,7 +26,7 @@ class Queue(
         if (destination.removePending) return reject("That folder is waiting to be deleted.")
 
         return when (choice) {
-            ShareChoice.SONG -> enqueueSong(target, destination)
+            ShareChoice.SONG -> enqueueSong(target, destination, resolvedTitle)
             ShareChoice.PLAYLIST -> enqueueAlbum(target, destination)
         }
     }
@@ -79,7 +79,7 @@ class Queue(
         return append(Command.SetLibraryRoot(ids(), clock(), path))
     }
 
-    private fun enqueueSong(target: YoutubeTarget, folder: FolderView): QueueResult {
+    private fun enqueueSong(target: YoutubeTarget, folder: FolderView, resolvedTitle: String?): QueueResult {
         val videoId = when (target) {
             is YoutubeTarget.Video -> target.videoId
             is YoutubeTarget.VideoAndPlaylist -> target.videoId
@@ -90,6 +90,12 @@ class Queue(
             return append(Command.Retry(ids(), clock(), existing.commandId))
         }
         if (existing != null && existing.blocksRemoval()) {
+            return reject("That song is already in this folder.")
+        }
+        if (!resolvedTitle.isNullOrBlank() && folder.tracks.any { track ->
+                track.videoId != videoId && SongNames.same(track.title, resolvedTitle) && track.blocksRemoval()
+            }
+        ) {
             return reject("That song is already in this folder.")
         }
         val url = target.url

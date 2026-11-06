@@ -83,6 +83,22 @@ sealed class DriveClient
         return folders;
     }
 
+    public async Task<string> EnsureFolderAsync(string parentId, string name)
+    {
+        var query = "name = '" + name.Replace("'", "\\'") + "' and mimeType = 'application/vnd.google-apps.folder' and '" + parentId + "' in parents and trashed = false";
+        var url = "https://www.googleapis.com/drive/v3/files?pageSize=1&fields=files(id)&q=" + Uri.EscapeDataString(query);
+        var files = JsonDocument.Parse(await GetAsync(url)).RootElement.GetProperty("files");
+        if (files.GetArrayLength() > 0) return files[0].GetProperty("id").GetString() ?? "";
+        var meta = JsonSerializer.Serialize(new { name, mimeType = "application/vnd.google-apps.folder", parents = new[] { parentId } });
+        using var request = new HttpRequestMessage(HttpMethod.Post, "https://www.googleapis.com/drive/v3/files?fields=id");
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", await AccessTokenAsync());
+        request.Content = new StringContent(meta, Encoding.UTF8, "application/json");
+        using var response = await _http.SendAsync(request);
+        var text = await response.Content.ReadAsStringAsync();
+        if (!response.IsSuccessStatusCode) throw new InvalidOperationException(GoogleError(text, "Google Drive returned " + (int)response.StatusCode));
+        return JsonDocument.Parse(text).RootElement.GetProperty("id").GetString() ?? "";
+    }
+
     public async Task<string?> ReadNamedAsync(string parentId, string name)
     {
         var id = await FindAsync(parentId, name);
@@ -312,20 +328,18 @@ sealed class DriveClient
 sealed class DriveNotebook : INotebookStore
 {
     private readonly DriveClient _drive;
-    private readonly string _folderId;
+    private readonly AppSettings _settings;
 
     public DriveNotebook(AppSettings settings)
     {
         _drive = new DriveClient(settings);
-        _folderId = settings.DriveFolderId;
+        _settings = settings;
     }
 
     public List<JobCommand> ReadCommands() =>
-        Notebook.ParseCommands(Task.Run(() => _drive.ReadNamedAsync(_folderId, "commands.jsonl")).GetAwaiter().GetResult() ?? "");
+        Notebook.ParseCommands(Task.Run(() => _drive.ReadNamedAsync(_settings.DriveFolderId, "commands.jsonl")).GetAwaiter().GetResult() ?? "");
 
-    public LibraryState ReadState() =>
-        Notebook.ParseState(Task.Run(() => _drive.ReadNamedAsync(_folderId, "state.json")).GetAwaiter().GetResult() ?? "");
+    public LibraryState ReadState() => new LibraryBook(_settings).ReadLibrary(_settings.LibraryName);
 
-    public void WriteState(LibraryState state) =>
-        Task.Run(() => _drive.WriteNamedAsync(_folderId, "state.json", JsonSerializer.Serialize(state, Notebook.Json))).GetAwaiter().GetResult();
+    public void WriteState(LibraryState state) => new LibraryBook(_settings).WriteLibrary(_settings.LibraryName, state);
 }

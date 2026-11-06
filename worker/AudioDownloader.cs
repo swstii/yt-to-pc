@@ -12,14 +12,18 @@ sealed class AudioDownloader
 
     public bool FfmpegExists => File.Exists(_ffmpegPath);
 
-    public async Task<SavedAudio> DownloadVideoAsync(
+    public async Task<SavedAudio?> DownloadVideoAsync(
         string videoId,
         string folderPath,
         CancellationToken cancellationToken,
-        Action<string>? onTitle = null)
+        Action<string>? onTitle = null,
+        IProgress<double>? progress = null,
+        Action? onSaving = null,
+        Func<string, bool>? alreadySaved = null)
     {
         var youtube = new YoutubeClient();
         var video = await youtube.Videos.GetAsync(videoId, cancellationToken);
+        if (alreadySaved?.Invoke(video.Title) == true) return null;
         if (!string.IsNullOrWhiteSpace(video.Title)) onTitle?.Invoke(video.Title);
         var manifest = await youtube.Videos.Streams.GetManifestAsync(videoId, cancellationToken);
         var audio = manifest.GetAudioOnlyStreams().GetWithHighestBitrate()
@@ -28,7 +32,8 @@ sealed class AudioDownloader
         var part = Path.Combine(folderPath, videoId + ".part");
         try
         {
-            await youtube.Videos.Streams.DownloadAsync(audio, part, cancellationToken: cancellationToken);
+            await youtube.Videos.Streams.DownloadAsync(audio, part, progress, cancellationToken);
+            onSaving?.Invoke();
             var fileName = UniqueName(folderPath, SafeTitle(video.Title), videoId);
             var output = Path.Combine(folderPath, fileName);
             await EncodeAsync(part, output, cancellationToken);

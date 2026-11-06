@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace YtToPc;
 
 sealed class QueueWorker
@@ -6,15 +8,22 @@ sealed class QueueWorker
     private readonly AudioDownloader _downloader;
     private int _running;
     private INotebookStore? _notebook;
+    private string _lastSaved = "";
 
     private INotebookStore? OpenNotebook()
     {
         if (!string.IsNullOrWhiteSpace(_settings.DriveFolderId)) return new DriveNotebook(_settings);
-        if (Directory.Exists(_settings.QueuePath)) return new LocalNotebook(_settings.QueuePath);
+        if (Directory.Exists(_settings.QueuePath)) return new LocalNotebook(_settings.QueuePath, _settings.LibraryName);
         return null;
     }
 
-    private void Save(LibraryState state) => _notebook!.WriteState(state);
+    private void Save(LibraryState state, bool force = false)
+    {
+        var text = JsonSerializer.Serialize(state, Notebook.Json);
+        if (!force && text == _lastSaved) return;
+        _notebook!.WriteState(state);
+        _lastSaved = text;
+    }
     private LibraryState Load() => _notebook!.ReadState();
     private List<JobCommand> LoadCommands() => _notebook!.ReadCommands();
 
@@ -25,9 +34,23 @@ sealed class QueueWorker
     }
 
     public string Status { get; private set; } = "Idle";
+    public int ProgressPercent { get; private set; } = -1;
+    public event Action? StatusChanged;
+
+    private void SetStatus(string status, int progress = -1)
+    {
+        if (Status == status && ProgressPercent == progress) return;
+        Status = status;
+        ProgressPercent = progress;
+        StatusChanged?.Invoke();
+    }
 
     public string MissingMusicPath =>
-        Directory.Exists(_settings.MusicPath) ? "" : _settings.MusicPath + " is not available. Connect the SSD.";
+        Directory.Exists(_settings.MusicPath) ? "" : _settings.MusicPath + " is not available. Check that the drive is connected.";
+
+    public void NoteUnreachable() => SetStatus("Can't reach Google. YT to PC is waiting for the internet.");
+
+    public void ForgetSaved() => _lastSaved = "";
 
     public async Task TickAsync(CancellationToken cancellationToken)
     {
@@ -38,11 +61,11 @@ sealed class QueueWorker
         }
         catch (OperationCanceledException)
         {
-            Status = "Checks paused";
+            SetStatus("Checks paused");
         }
         catch (Exception error)
         {
-            Status = Short(error.Message);
+            SetStatus(Short(error.Message));
         }
         finally
         {
@@ -54,7 +77,7 @@ sealed class QueueWorker
     {
         if (!string.IsNullOrEmpty(MissingMusicPath))
         {
-            Status = MissingMusicPath;
+            SetStatus(MissingMusicPath);
             _notebook = OpenNotebook();
             WriteUnavailable();
             return;
@@ -62,23 +85,28 @@ sealed class QueueWorker
         _notebook = OpenNotebook();
         if (_notebook == null)
         {
-            Status = "Choose the Drive queue folder.";
+            SetStatus("Choose the Drive queue folder.");
             return;
         }
         if (!_downloader.FfmpegExists)
         {
-            Status = "ffmpeg was not found, so songs cannot be saved yet.";
+            SetStatus("ffmpeg was not found, so songs cannot be saved yet.");
             PublishReadyShell();
             return;
         }
 
+        SetStatus("Scanning Drive");
         var commands = LoadCommands();
         var state = Load();
+        state.LibraryName = ActiveLibraryName();
         state.LibraryRoot = _settings.MusicPath;
         state.LibraryReady = true;
-        SyncFolders(state, commands);
-        ApplyFastCommands(state, commands);
-        Save(state);
+        SetStatus("Checking the music folder");
+        var changes = SyncFolders(state, commands);
+        var commandNotes = ApplyFastCommands(state, commands);
+        var update = Summarize(changes.Concat(commandNotes).Where(note => note.Length > 0).ToList());
+        if (update.Length > 0) SetStatus("Updating Drive: " + update);
+        Save(state, force: true);
         cancellationToken.ThrowIfCancellationRequested();
 
         var video = NextVideo(commands, state);
@@ -94,13 +122,14 @@ sealed class QueueWorker
             await ExpandPlaylistAsync(state, playlist, cancellationToken);
             return;
         }
-        Status = "Idle";
+        if (update.Length == 0) SetStatus("Idle");
     }
 
     private void WriteUnavailable()
     {
         if (_notebook == null) return;
         var state = Load();
+        state.LibraryName = ActiveLibraryName();
         state.LibraryRoot = _settings.MusicPath;
         state.LibraryReady = false;
         Save(state);
@@ -109,48 +138,65 @@ sealed class QueueWorker
     private void PublishReadyShell()
     {
         var state = Load();
+        state.LibraryName = ActiveLibraryName();
         state.LibraryRoot = _settings.MusicPath;
         state.LibraryReady = true;
         SyncFolders(state, LoadCommands());
         Save(state);
     }
 
-    private void SyncFolders(LibraryState state, List<JobCommand> commands)
+    private List<string> SyncFolders(LibraryState state, List<JobCommand> commands)
     {
         var waiting = commands
             .Where(command => command.Type == "make-folder" && !state.Commands.ContainsKey(command.Id))
             .Select(command => Text(command, "folder"))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var notes = new List<string>();
         foreach (var directory in Directory.GetDirectories(_settings.MusicPath))
         {
             var name = Path.GetFileName(directory);
             if (string.IsNullOrWhiteSpace(name) || name.Equals("_queue", StringComparison.OrdinalIgnoreCase)) continue;
             if (state.Folders.All(folder => !folder.Name.Equals(name, StringComparison.OrdinalIgnoreCase)))
+            {
                 state.Folders.Add(new StateFolder { Name = name });
+                notes.Add("added folder " + name);
+            }
         }
-        state.Folders.RemoveAll(folder =>
-            !Directory.Exists(Path.Combine(_settings.MusicPath, folder.Name)) && !waiting.Contains(folder.Name));
-        foreach (var folder in state.Folders) SyncDiskTracks(folder);
+        var removedFolders = state.Folders
+            .Where(folder => !Directory.Exists(Path.Combine(_settings.MusicPath, folder.Name)) && !waiting.Contains(folder.Name))
+            .Select(folder => folder.Name)
+            .ToList();
+        state.Folders.RemoveAll(folder => removedFolders.Contains(folder.Name, StringComparer.OrdinalIgnoreCase));
+        foreach (var name in removedFolders) notes.Add("removed folder " + name);
+        var removedFiles = new List<DiskFile>();
+        var addedFiles = new List<DiskFile>();
+        foreach (var folder in state.Folders) SyncDiskTracks(folder, removedFiles, addedFiles);
+        foreach (var folder in state.Folders) RemoveDownloadedDuplicates(folder, notes);
+        notes.AddRange(DescribeTrackChanges(removedFiles, addedFiles));
         state.Folders.Sort((left, right) => string.Compare(left.Name, right.Name, StringComparison.OrdinalIgnoreCase));
+        return notes;
     }
 
-    private void SyncDiskTracks(StateFolder folder)
+    private void SyncDiskTracks(StateFolder folder, List<DiskFile> removedFiles, List<DiskFile> addedFiles)
     {
         var directory = Path.Combine(_settings.MusicPath, folder.Name);
-        if (!Directory.Exists(directory)) return;
-        var files = Directory.EnumerateFiles(directory, "*.mp3")
-            .Select(Path.GetFileName)
-            .Where(name => !string.IsNullOrWhiteSpace(name))
-            .Cast<string>()
-            .ToList();
+        var before = folder.Tracks
+            .Where(track => !string.IsNullOrWhiteSpace(track.FileName))
+            .Select(track => track.FileName!)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var files = Directory.Exists(directory)
+            ? Directory.EnumerateFiles(directory, "*.mp3").Select(Path.GetFileName).Where(name => !string.IsNullOrWhiteSpace(name)).Cast<string>().ToList()
+            : [];
         var names = files.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var fileName in before.Where(name => !names.Contains(name)))
+            removedFiles.Add(new DiskFile(folder.Name, fileName));
         folder.Tracks.RemoveAll(track =>
             track.Status is "done" or "skipped" &&
             !string.IsNullOrWhiteSpace(track.FileName) &&
             !names.Contains(track.FileName));
         foreach (var fileName in files)
         {
-            if (folder.Tracks.Any(track => string.Equals(track.FileName, fileName, StringComparison.OrdinalIgnoreCase))) continue;
+            if (before.Contains(fileName) || folder.Tracks.Any(track => string.Equals(track.FileName, fileName, StringComparison.OrdinalIgnoreCase))) continue;
             var title = Path.GetFileNameWithoutExtension(fileName);
             folder.Tracks.Add(new StateTrack
             {
@@ -159,25 +205,102 @@ sealed class QueueWorker
                 FileName = fileName,
                 Status = "done",
             });
+            addedFiles.Add(new DiskFile(folder.Name, fileName));
         }
         folder.Tracks.Sort((left, right) => string.Compare(left.Title, right.Title, StringComparison.OrdinalIgnoreCase));
     }
 
-    private void ApplyFastCommands(LibraryState state, List<JobCommand> commands)
+    private void RemoveDownloadedDuplicates(StateFolder folder, List<string> notes)
     {
+        var saved = folder.Tracks
+            .Where(track => track.Status is "done" or "skipped" && !string.IsNullOrWhiteSpace(track.FileName) && !string.IsNullOrWhiteSpace(track.Title))
+            .ToList();
+        foreach (var group in saved.GroupBy(track => SongKey(track.Title)).Where(group => group.Key.Length > 0 && group.Count() > 1))
+        {
+            var keeper = group.FirstOrDefault(track => track.VideoId.StartsWith("file:", StringComparison.Ordinal)) ?? group.First();
+            foreach (var extra in group)
+            {
+                if (ReferenceEquals(extra, keeper) || extra.VideoId.StartsWith("file:", StringComparison.Ordinal)) continue;
+                var path = Path.Combine(_settings.MusicPath, folder.Name, extra.FileName!);
+                if (File.Exists(path)) File.Delete(path);
+                folder.Tracks.Remove(extra);
+                notes.Add("removed duplicate " + extra.Title + " from " + folder.Name);
+            }
+        }
+    }
+
+    private static string SongKey(string? title) => title?.Trim().ToLowerInvariant() ?? "";
+
+    private static bool SameSong(string? left, string? right)
+    {
+        var a = SongKey(left);
+        var b = SongKey(right);
+        return a.Length > 0 && a == b;
+    }
+
+    private static bool FolderHasSong(StateFolder folder, string title, string exceptVideoId) =>
+        folder.Tracks.Any(track =>
+            track.VideoId != exceptVideoId &&
+            track.Status != "failed" &&
+            SameSong(track.Title, title));
+
+
+    private static List<string> DescribeTrackChanges(List<DiskFile> removedFiles, List<DiskFile> addedFiles)
+    {
+        var notes = new List<string>();
+        foreach (var added in addedFiles.ToList())
+        {
+            var moved = removedFiles.FirstOrDefault(file =>
+                !file.Folder.Equals(added.Folder, StringComparison.OrdinalIgnoreCase) &&
+                file.Name.Equals(added.Name, StringComparison.OrdinalIgnoreCase));
+            if (moved == null) continue;
+            notes.Add("moved " + DisplayName(added.Name) + " from " + moved.Folder + " to " + added.Folder);
+            removedFiles.Remove(moved);
+            addedFiles.Remove(added);
+        }
+        foreach (var folder in removedFiles.Select(file => file.Folder).Distinct(StringComparer.OrdinalIgnoreCase).ToList())
+        {
+            var removed = removedFiles.Where(file => file.Folder.Equals(folder, StringComparison.OrdinalIgnoreCase)).ToList();
+            var added = addedFiles.Where(file => file.Folder.Equals(folder, StringComparison.OrdinalIgnoreCase)).ToList();
+            if (removed.Count == 1 && added.Count == 1)
+            {
+                notes.Add("renamed " + DisplayName(removed[0].Name) + " to " + DisplayName(added[0].Name) + " in " + folder);
+                removedFiles.Remove(removed[0]);
+                addedFiles.Remove(added[0]);
+            }
+        }
+        foreach (var file in removedFiles) notes.Add("deleted " + DisplayName(file.Name) + " from " + file.Folder);
+        foreach (var file in addedFiles) notes.Add("added " + DisplayName(file.Name) + " to " + file.Folder);
+        return notes;
+    }
+
+    private static string Summarize(List<string> notes)
+    {
+        if (notes.Count == 0) return "";
+        if (notes.Count <= 3) return string.Join(", ", notes);
+        return notes.Count + " music folder changes, including " + string.Join(", ", notes.Take(2));
+    }
+
+    private static string DisplayName(string fileName) => Path.GetFileNameWithoutExtension(fileName);
+
+    private sealed record DiskFile(string Folder, string Name);
+
+    private List<string> ApplyFastCommands(LibraryState state, List<JobCommand> commands)
+    {
+        var notes = new List<string>();
         foreach (var command in commands)
         {
             if (state.Commands.ContainsKey(command.Id)) continue;
             switch (command.Type)
             {
                 case "make-folder":
-                    MakeFolder(state, command);
+                    notes.Add(MakeFolder(state, command));
                     break;
                 case "remove-folder":
-                    RemoveFolder(state, command);
+                    notes.Add(RemoveFolder(state, command));
                     break;
                 case "delete-track":
-                    DeleteTrack(state, command);
+                    notes.Add(DeleteTrack(state, command));
                     break;
                 case "retry":
                     Retry(state, command);
@@ -187,9 +310,10 @@ sealed class QueueWorker
                     break;
             }
         }
+        return notes;
     }
 
-    private void MakeFolder(LibraryState state, JobCommand command)
+    private string MakeFolder(LibraryState state, JobCommand command)
     {
         var name = Text(command, "folder");
         try
@@ -198,33 +322,37 @@ sealed class QueueWorker
             if (state.Folders.All(folder => !folder.Name.Equals(name, StringComparison.OrdinalIgnoreCase)))
                 state.Folders.Add(new StateFolder { Name = name });
             Settle(state, command.Id, "done", null);
+            return "added folder " + name;
         }
         catch (Exception error)
         {
             Settle(state, command.Id, "failed", Short(error.Message));
+            return "";
         }
     }
 
-    private void RemoveFolder(LibraryState state, JobCommand command)
+    private string RemoveFolder(LibraryState state, JobCommand command)
     {
         var name = Text(command, "folder");
         var path = Path.Combine(_settings.MusicPath, name);
         if (Directory.Exists(path) && Directory.EnumerateFileSystemEntries(path).Any())
         {
             Settle(state, command.Id, "failed", "That folder still has songs.");
-            return;
+            return "";
         }
         if (Directory.Exists(path)) Directory.Delete(path);
         state.Folders.RemoveAll(folder => folder.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
         Settle(state, command.Id, "done", null);
+        return "removed folder " + name;
     }
 
-    private void DeleteTrack(LibraryState state, JobCommand command)
+    private string DeleteTrack(LibraryState state, JobCommand command)
     {
         var folderName = Text(command, "folder");
         var videoId = Text(command, "videoId");
         var folder = state.Folders.FirstOrDefault(item => item.Name.Equals(folderName, StringComparison.OrdinalIgnoreCase));
         var track = folder?.Tracks.FirstOrDefault(item => item.VideoId == videoId);
+        var title = string.IsNullOrWhiteSpace(track?.Title) ? videoId : track.Title;
         if (track?.FileName is { Length: > 0 })
         {
             var file = Path.Combine(_settings.MusicPath, folderName, track.FileName);
@@ -232,6 +360,7 @@ sealed class QueueWorker
         }
         folder?.Tracks.RemoveAll(item => item.VideoId == videoId);
         Settle(state, command.Id, "done", null);
+        return "deleted " + title + " from " + folderName;
     }
 
     private void Retry(LibraryState state, JobCommand command)
@@ -292,8 +421,10 @@ sealed class QueueWorker
         var track = TrackFor(state, video);
         track.Status = "downloading";
         track.Error = null;
+        var song = string.IsNullOrWhiteSpace(track.Title) || track.Title == video.VideoId ? video.VideoId : track.Title;
+        SetStatus("Downloading " + song + ": 0%", 0);
         Save(state);
-        Status = "Downloading " + (string.IsNullOrWhiteSpace(track.Title) ? video.VideoId : track.Title);
+        var lastPercent = 0;
         try
         {
             var saved = await _downloader.DownloadVideoAsync(
@@ -303,19 +434,43 @@ sealed class QueueWorker
                 title =>
                 {
                     track.Title = title;
-                    Status = "Downloading " + title;
+                    song = title;
+                    SetStatus("Downloading " + song + ": " + lastPercent + "%", lastPercent);
                     Save(state);
+                },
+                new Progress<double>(fraction =>
+                {
+                    var percent = Math.Clamp((int)Math.Round(fraction * 100), 0, 100);
+                    if (percent == lastPercent) return;
+                    lastPercent = percent;
+                    SetStatus("Downloading " + song + ": " + percent + "%", percent);
+                }),
+                () => SetStatus("Saving " + song + " as MP3", 100),
+                title =>
+                {
+                    song = title;
+                    var home = state.Folders.FirstOrDefault(item => item.Name.Equals(video.Folder, StringComparison.OrdinalIgnoreCase));
+                    return home != null && FolderHasSong(home, title, video.VideoId);
                 });
+            if (saved == null)
+            {
+                var home = state.Folders.FirstOrDefault(item => item.Name.Equals(video.Folder, StringComparison.OrdinalIgnoreCase));
+                home?.Tracks.RemoveAll(item => item.VideoId == video.VideoId);
+                if (video.CommandId != null) Settle(state, video.CommandId, "skipped", null);
+                SetStatus("Already in this folder: " + song);
+                Save(state);
+                return;
+            }
             track.Title = saved.Title;
             track.FileName = saved.FileName;
             track.Status = "done";
             if (video.CommandId != null) Settle(state, video.CommandId, "done", null);
-            Status = "Saved " + saved.Title;
+            SetStatus("Saved " + saved.Title);
         }
         catch (OperationCanceledException)
         {
             track.Status = "pending";
-            Status = "Checks paused";
+            SetStatus("Checks paused");
             throw;
         }
         catch (Exception error)
@@ -323,7 +478,7 @@ sealed class QueueWorker
             track.Status = "failed";
             track.Error = Short(error.Message);
             if (video.CommandId != null) Settle(state, video.CommandId, "failed", track.Error);
-            Status = track.Error;
+            SetStatus(track.Error ?? "Download failed");
         }
         Save(state);
     }
@@ -332,7 +487,7 @@ sealed class QueueWorker
     {
         var folderName = Text(command, "folder");
         var playlistId = Text(command, "playlistId");
-        Status = "Reading playlist";
+        SetStatus("Reading playlist");
         try
         {
             var items = await _downloader.ListPlaylistAsync(playlistId, cancellationToken);
@@ -342,6 +497,7 @@ sealed class QueueWorker
             foreach (var item in items)
             {
                 if (folder.Tracks.Any(track => track.VideoId == item.VideoId && track.Status != "failed")) continue;
+                if (folder.Tracks.Any(track => track.Status != "failed" && SameSong(track.Title, item.Title))) continue;
                 folder.Tracks.Add(new StateTrack
                 {
                     VideoId = item.VideoId,
@@ -351,7 +507,7 @@ sealed class QueueWorker
                 });
             }
             Settle(state, command.Id, "expanded", null);
-            Status = "Playlist queued";
+            SetStatus("Playlist queued");
         }
         catch (OperationCanceledException)
         {
@@ -360,7 +516,7 @@ sealed class QueueWorker
         catch (Exception error)
         {
             Settle(state, command.Id, "failed", Short(error.Message));
-            Status = Short(error.Message);
+            SetStatus(Short(error.Message));
         }
         Save(state);
     }
@@ -386,6 +542,9 @@ sealed class QueueWorker
 
     private static void Settle(LibraryState state, string id, string status, string? error) =>
         state.Commands[id] = new CommandState { Status = status, Error = error };
+
+    private string? ActiveLibraryName() =>
+        string.IsNullOrWhiteSpace(_settings.LibraryName) ? null : _settings.LibraryName.Trim();
 
     private static string Text(JobCommand command, string name) =>
         command.Body.TryGetProperty(name, out var value) ? value.GetString() ?? "" : "";

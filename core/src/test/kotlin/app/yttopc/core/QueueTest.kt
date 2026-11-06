@@ -131,6 +131,32 @@ class QueueTest {
     }
 
     @Test
+    fun rejectsOnlyAnExactTitleAlreadyInTheFolder() {
+        val state = LibraryState(
+            folders = listOf(
+                StateFolder(
+                    "daft_punk",
+                    listOf(StateTrack("file:video.mp3", "Daft Punk - One More Time (Official Video)", status = ItemStatus.DONE)),
+                ),
+            ),
+        )
+        val audio = queue(state = state).enqueue(
+            "https://youtu.be/A2VpR8HahKc",
+            "daft_punk",
+            ShareChoice.SONG,
+            "Daft Punk - One More Time (Official Audio)",
+        )
+        assertIs<Command.EnqueueVideo>(audio.command())
+        val again = queue(state = state).enqueue(
+            "https://youtu.be/bbbbbbbbbbb",
+            "daft_punk",
+            ShareChoice.SONG,
+            "Daft Punk - One More Time (Official Video)",
+        )
+        assertEquals("That song is already in this folder.", again.reason())
+    }
+
+    @Test
     fun allowsTheSameSongInAnotherFolder() {
         val state = LibraryState(
             folders = listOf(

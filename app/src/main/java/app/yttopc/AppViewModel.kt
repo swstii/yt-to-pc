@@ -6,17 +6,23 @@ import android.content.Intent
 import androidx.activity.result.IntentSenderRequest
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import app.yttopc.core.Command
 import app.yttopc.core.LibraryView
 import app.yttopc.core.Queue
 import app.yttopc.core.withKnownTitles
 import app.yttopc.core.QueueResult
+import app.yttopc.core.ParseResult
 import app.yttopc.core.ShareChoice
+import app.yttopc.core.YoutubeLinks
+import app.yttopc.core.YoutubeTarget
 import app.yttopc.data.DriveAuth
 import app.yttopc.data.DriveFiles
 import app.yttopc.data.DriveFolder
 import app.yttopc.data.LoadedNotebook
 import app.yttopc.data.NeedsSignIn
 import app.yttopc.data.NotebookRepository
+import app.yttopc.data.QueueNotifier
+import app.yttopc.data.Reachability
 import app.yttopc.data.YoutubeTitles
 import app.yttopc.data.await
 import com.google.android.gms.auth.api.identity.Identity
@@ -29,7 +35,7 @@ import kotlinx.coroutines.withContext
 
 sealed interface Screen {
     data object Home : Screen
-    data class Folder(val name: String) : Screen
+    data class Folder(val name: String, val focusVideoId: String? = null, val focusCommandId: String? = null) : Screen
     data class Share(val text: String, val folder: String? = null) : Screen
     data object Settings : Screen
 }
@@ -44,6 +50,7 @@ data class UiState(
     val message: String? = null,
     val screen: Screen = Screen.Home,
     val busy: Boolean = false,
+    val offline: Boolean = false,
 )
 
 class AppViewModel(app: Application) : AndroidViewModel(app) {
@@ -60,9 +67,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun refresh() {
         viewModelScope.launch {
+            val online = withContext(Dispatchers.IO) { Reachability.driveReachable() }
+            if (!online) {
+                _state.update { it.copy(loading = false, busy = false, offline = true) }
+                return@launch
+            }
             val folderId = repository.folderId()
             val folderName = repository.folderName()
             try {
+                _state.update { it.copy(offline = false) }
                 val token = DriveAuth.authorize(getApplication())
                 if (token == null) {
                     _state.update {
@@ -278,7 +291,27 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun retry(commandId: String) = submit("Retry queued.", { it.retry(commandId) })
 
     fun enqueue(text: String, folder: String, choice: ShareChoice) {
-        submit("Queued for the laptop.", { it.enqueue(text, folder, choice) })
+        if (_state.value.busy) return
+        _state.update { it.copy(busy = true) }
+        viewModelScope.launch {
+            val resolved = if (choice == ShareChoice.SONG) resolvedTitle(text) else null
+            finish("Queued for the laptop.") { it.enqueue(text, folder, choice, resolved) }
+        }
+    }
+
+    private suspend fun resolvedTitle(text: String): String? {
+        val id = when (val parsed = YoutubeLinks.parse(text)) {
+            is ParseResult.Found -> when (val target = parsed.target) {
+                is YoutubeTarget.Video -> target.videoId
+                is YoutubeTarget.VideoAndPlaylist -> target.videoId
+                is YoutubeTarget.Playlist -> return null
+            }
+            else -> return null
+        }
+        knownTitles[id]?.let { return it }
+        val title = withContext(Dispatchers.IO) { YoutubeTitles.lookup(id) }
+        if (!title.isNullOrBlank()) knownTitles[id] = title
+        return title
     }
 
     private fun present(library: LibraryView): LibraryView {
@@ -305,21 +338,44 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    private fun announce(command: Command) {
+        val (title, text) = when (command) {
+            is Command.EnqueueVideo -> "Song queued" to "${songName(command.videoId)} · ${command.folder}"
+            is Command.EnqueuePlaylist -> "Playlist queued" to command.folder
+            is Command.DeleteTrack -> "Delete queued" to "${songName(command.videoId)} · ${command.folder}"
+            else -> return
+        }
+        runCatching { QueueNotifier.show(getApplication(), command.id.hashCode(), title, text) }
+    }
+
+    private fun songName(videoId: String): String {
+        knownTitles[videoId]?.let { return it }
+        val titled = _state.value.library.folders
+            .flatMap { it.tracks }
+            .find { it.videoId == videoId }
+            ?.title
+        return titled?.takeIf { it.isNotBlank() && it != videoId } ?: "Song"
+    }
+
     private fun submit(success: String, action: (Queue) -> QueueResult) {
         if (_state.value.busy) return
         _state.update { it.copy(busy = true) }
-        viewModelScope.launch {
+        viewModelScope.launch { finish(success, action) }
+    }
+
+    private suspend fun finish(success: String, action: (Queue) -> QueueResult) {
             try {
                 val token = DriveAuth.authorize(getApplication()) ?: throw NeedsSignIn()
                 val loaded = withContext(Dispatchers.IO) { repository.load(token) }
                 if (loaded !is LoadedNotebook.Ready) {
                     _state.update { it.copy(busy = false, message = "Choose the Drive folder first.") }
-                    return@launch
+                    return
                 }
                 when (val result = action(Queue(loaded.commands, loaded.state))) {
                     is QueueResult.Rejected -> _state.update { it.copy(busy = false, message = result.reason) }
                     is QueueResult.Append -> {
                         withContext(Dispatchers.IO) { repository.append(token, result.command) }
+                        announce(result.command)
                         val again = withContext(Dispatchers.IO) { repository.load(token) }
                         val library = if (again is LoadedNotebook.Ready) {
                             present(Queue(again.commands, again.state).view)
@@ -334,6 +390,5 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             } catch (error: Exception) {
                 _state.update { it.copy(busy = false, message = error.message ?: "Could not update the queue.") }
             }
-        }
     }
 }

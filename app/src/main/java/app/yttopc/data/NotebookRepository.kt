@@ -4,6 +4,7 @@ import android.content.Context
 import app.yttopc.core.Command
 import app.yttopc.core.LibraryState
 import app.yttopc.core.NotebookJson
+import org.json.JSONObject
 
 sealed class LoadedNotebook {
     data object Missing : LoadedNotebook()
@@ -36,7 +37,11 @@ class NotebookRepository(context: Context) {
         return try {
             synchronized(lock) {
                 val commands = NotebookJson.readCommands(DriveFiles.readNamed(token, folderId, COMMANDS).orEmpty())
-                val stateText = DriveFiles.readNamed(token, folderId, STATE)
+                val catalog = DriveFiles.readNamed(token, folderId, LIBRARIES)
+                val active = activeLibrary(catalog)
+                val stateText = readNestedState(token, folderId, active)
+                    ?: DriveFiles.readNamed(token, folderId, legacyStateName(active))
+                    ?: if (active == null) null else DriveFiles.readNamed(token, folderId, STATE)
                 val state = if (stateText.isNullOrBlank()) LibraryState() else NotebookJson.readState(stateText)
                 LoadedNotebook.Ready(commands, state)
             }
@@ -60,5 +65,24 @@ class NotebookRepository(context: Context) {
         const val KEY_FOLDER_NAME = "drive_folder_name"
         const val COMMANDS = "commands.jsonl"
         const val STATE = "state.json"
+        const val LIBRARIES = "libraries.json"
+
+        fun activeLibrary(catalog: String?): String? {
+            if (catalog.isNullOrBlank()) return null
+            return try {
+                JSONObject(catalog).optString("active").trim().ifEmpty { null }
+            } catch (_: Exception) {
+                null
+            }
+        }
+
+        fun legacyStateName(active: String?) = if (active.isNullOrBlank()) STATE else "$active-state.json"
+
+        fun readNestedState(token: String, folderId: String, active: String?): String? {
+            if (active.isNullOrBlank()) return null
+            val stateRoot = DriveFiles.findFolder(token, folderId, "state") ?: return null
+            val library = DriveFiles.findFolder(token, stateRoot, active) ?: return null
+            return DriveFiles.readNamed(token, library, STATE)
+        }
     }
 }

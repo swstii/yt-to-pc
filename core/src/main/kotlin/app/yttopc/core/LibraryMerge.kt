@@ -40,6 +40,7 @@ data class LibraryView(
     val pendingLibraryRoot: String?,
     val libraryReady: Boolean,
     val folders: List<FolderView>,
+    val libraryName: String? = null,
 )
 
 fun LibraryView.withKnownTitles(titles: Map<String, String>): LibraryView = copy(
@@ -113,6 +114,7 @@ fun merge(commands: List<Command>, state: LibraryState): LibraryView {
         pendingLibraryRoot = pendingRoot,
         libraryReady = state.libraryReady && pendingRoot == null,
         folders = folders,
+        libraryName = state.libraryName,
     )
 }
 

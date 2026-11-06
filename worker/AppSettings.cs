@@ -3,6 +3,7 @@ namespace YtToPc;
 sealed class AppSettings
 {
     public string MusicPath { get; set; } = @"E:\ripped_tracks";
+    public string LibraryName { get; set; } = "";
     public string QueuePath { get; set; } = "";
     public string DriveFolderId { get; set; } = "";
     public string DriveFolderName { get; set; } = "";

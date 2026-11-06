@@ -140,6 +140,7 @@ data class StateFolder(
 
 @Serializable
 data class LibraryState(
+    val libraryName: String? = null,
     val libraryRoot: String? = null,
     val libraryReady: Boolean = false,
     val folders: List<StateFolder> = emptyList(),

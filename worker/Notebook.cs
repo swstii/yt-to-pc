@@ -55,7 +55,13 @@ sealed class LocalNotebook : INotebookStore
 {
     private readonly string _queuePath;
 
-    public LocalNotebook(string queuePath) => _queuePath = queuePath;
+    private readonly string _libraryFolder;
+
+    public LocalNotebook(string queuePath, string? libraryName = null)
+    {
+        _queuePath = queuePath;
+        _libraryFolder = LibraryNames.Folder(libraryName);
+    }
 
     public List<JobCommand> ReadCommands()
     {
@@ -63,26 +69,17 @@ sealed class LocalNotebook : INotebookStore
         return File.Exists(file) ? Notebook.ParseCommands(File.ReadAllText(file)) : [];
     }
 
-    public LibraryState ReadState()
-    {
-        var file = Path.Combine(_queuePath, "state.json");
-        return File.Exists(file) ? Notebook.ParseState(File.ReadAllText(file)) : new LibraryState();
-    }
+    public LibraryState ReadState() => new LibraryBook(new AppSettings { QueuePath = _queuePath, LibraryName = _libraryFolder }).ReadLibrary(_libraryFolder);
 
-    public void WriteState(LibraryState state)
-    {
-        Directory.CreateDirectory(_queuePath);
-        var file = Path.Combine(_queuePath, "state.json");
-        var temp = file + ".tmp";
-        File.WriteAllText(temp, JsonSerializer.Serialize(state, Notebook.Json));
-        File.Move(temp, file, overwrite: true);
-    }
+    public void WriteState(LibraryState state) =>
+        new LibraryBook(new AppSettings { QueuePath = _queuePath }).WriteLibrary(_libraryFolder, state);
 }
 
 sealed record JobCommand(string Type, string Id, string At, JsonElement Body);
 
 sealed class LibraryState
 {
+    public string? LibraryName { get; set; }
     public string? LibraryRoot { get; set; }
     public bool LibraryReady { get; set; }
     public List<StateFolder> Folders { get; set; } = [];

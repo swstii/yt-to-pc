@@ -50,6 +50,15 @@ object DriveFiles {
         return DriveFolder(json.getString("id"), json.getString("name"))
     }
 
+    fun findFolder(token: String, parentId: String, name: String): String? {
+        val query = "name = '${name.replace("'", "\\'")}' and mimeType = 'application/vnd.google-apps.folder' and '$parentId' in parents and trashed = false"
+        val url = "https://www.googleapis.com/drive/v3/files?pageSize=1&fields=files(id)&q=" +
+            URLEncoder.encode(query, Charsets.UTF_8.name())
+        val files = JSONObject(request("GET", url, token, null, null)).optJSONArray("files") ?: return null
+        if (files.length() == 0) return null
+        return files.getJSONObject(0).getString("id")
+    }
+
     fun readNamed(token: String, parentId: String, name: String): String? {
         val id = findNamed(token, parentId, name) ?: return null
         return request(

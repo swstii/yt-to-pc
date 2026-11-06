@@ -8,13 +8,15 @@ sealed class MainForm : Form
     private readonly QueueWorker _worker;
     private readonly System.Windows.Forms.Timer _timer = new();
     private readonly NotifyIcon _tray = new();
-    private readonly Label _status = new();
+    private readonly Label _status = new() { AutoSize = false };
+    private readonly ProgressBar _progress = new() { Minimum = 0, Maximum = 100 };
     private readonly Label _music = new();
     private readonly Label _queue = new();
     private readonly Button _toggle = new();
     private readonly CheckBox _startup = new();
     private CancellationTokenSource _run = new();
     private bool _warned;
+    private bool _offlineShown;
 
     public MainForm()
     {
@@ -22,20 +24,25 @@ sealed class MainForm : Form
         Text = "YT to PC";
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
-        ClientSize = new Size(460, 280);
+        ClientSize = new Size(480, 340);
         StartPosition = FormStartPosition.CenterScreen;
+        _worker.StatusChanged += () =>
+        {
+            if (IsHandleCreated) BeginInvoke(RefreshLabels);
+        };
 
-        _status.SetBounds(20, 16, 420, 48);
-        _music.SetBounds(20, 72, 420, 36);
-        _queue.SetBounds(20, 112, 420, 36);
-        _toggle.SetBounds(20, 164, 200, 36);
+        _status.SetBounds(20, 16, 440, 72);
+        _progress.SetBounds(20, 92, 440, 18);
+        _music.SetBounds(20, 118, 440, 36);
+        _queue.SetBounds(20, 156, 440, 28);
+        _toggle.SetBounds(20, 196, 210, 36);
         _toggle.Click += (_, _) => SetChecks(!_settings.ChecksEnabled);
-        var chooseQueue = new Button { Text = "Queue folder", Bounds = new Rectangle(232, 164, 200, 36) };
+        var chooseQueue = new Button { Text = "Queue folder", Bounds = new Rectangle(246, 196, 210, 36) };
         chooseQueue.Click += (_, _) => ChooseQueue();
-        var chooseMusic = new Button { Text = "Music folder", Bounds = new Rectangle(20, 212, 200, 36) };
+        var chooseMusic = new Button { Text = "Music folder", Bounds = new Rectangle(20, 248, 210, 36) };
         chooseMusic.Click += (_, _) => ChooseMusic();
         _startup.Text = "Start with Windows";
-        _startup.SetBounds(232, 216, 200, 28);
+        _startup.SetBounds(246, 252, 210, 28);
         _startup.Checked = _settings.StartWithWindows;
         _startup.CheckedChanged += (_, _) =>
         {
@@ -44,7 +51,7 @@ sealed class MainForm : Form
             SetStartup(_startup.Checked);
         };
 
-        Controls.AddRange([_status, _music, _queue, _toggle, chooseQueue, chooseMusic, _startup]);
+        Controls.AddRange([_status, _progress, _music, _queue, _toggle, chooseQueue, chooseMusic, _startup]);
 
         var icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
         if (icon != null) Icon = icon;
@@ -61,17 +68,11 @@ sealed class MainForm : Form
         menu.Items.Add("Exit", null, (_, _) => ExitApplication());
         _tray.ContextMenuStrip = menu;
 
-        _timer.Interval = 30_000;
+        _timer.Interval = 60_000;
         _timer.Tick += async (_, _) => await TickAsync();
 
         AudioDownloader.DeletePartFiles(_settings.MusicPath);
         RefreshLabels();
-        var missing = _worker.MissingMusicPath;
-        if (missing.Length > 0)
-        {
-            _warned = true;
-            Shown += (_, _) => MessageBox.Show(this, missing, "YT to PC", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-        }
         if (string.IsNullOrWhiteSpace(_settings.DriveFolderId) && string.IsNullOrWhiteSpace(_settings.QueuePath))
         {
             Shown += (_, _) => ShowAgain();
@@ -117,8 +118,20 @@ sealed class MainForm : Form
     private async Task TickAsync()
     {
         if (!_settings.ChecksEnabled) return;
+        if (!await NetworkGate.DriveReachableAsync())
+        {
+            _worker.NoteUnreachable();
+            RefreshLabels();
+            if (!_offlineShown)
+            {
+                _offlineShown = true;
+                ShowAgain();
+            }
+            return;
+        }
+        _offlineShown = false;
         RefreshLabels();
-        if (_worker.MissingMusicPath.Length > 0)
+        if (_settings.ChecksEnabled && _worker.MissingMusicPath.Length > 0)
         {
             if (!_warned)
             {
@@ -215,26 +228,141 @@ sealed class MainForm : Form
 
     private void ChooseMusic()
     {
-        using var dialog = new FolderBrowserDialog { Description = "Folder on the SSD where MP3s are saved", UseDescriptionForTitle = true };
-        if (Directory.Exists(_settings.MusicPath)) dialog.SelectedPath = _settings.MusicPath;
-        if (dialog.ShowDialog(this) != DialogResult.OK) return;
-        _settings.MusicPath = dialog.SelectedPath;
-        _settings.Save();
+        if (string.IsNullOrWhiteSpace(_settings.DriveFolderId) && !Directory.Exists(_settings.QueuePath))
+        {
+            MessageBox.Show(this, "Choose the Drive queue folder first.", "YT to PC");
+            return;
+        }
+        LibraryCatalog catalog;
+        try
+        {
+            catalog = new LibraryBook(_settings).Read();
+        }
+        catch (Exception error)
+        {
+            MessageBox.Show(this, error.Message, "YT to PC");
+            return;
+        }
+        using var dialog = new Form
+        {
+            Text = "Music folder",
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            StartPosition = FormStartPosition.CenterParent,
+            ClientSize = new Size(460, 360),
+            MaximizeBox = false,
+            MinimizeBox = false,
+        };
+        var saved = new ListBox { Bounds = new Rectangle(16, 36, 428, 110) };
+        foreach (var entry in catalog.Libraries.OrderBy(item => item.Name, StringComparer.OrdinalIgnoreCase))
+            saved.Items.Add(entry.Name);
+        var nameBox = new TextBox { Bounds = new Rectangle(16, 176, 428, 24), Text = _settings.LibraryName };
+        var pathBox = new TextBox { Bounds = new Rectangle(16, 230, 320, 24), Text = _settings.MusicPath };
+        var browse = new Button { Text = "Browse", Bounds = new Rectangle(344, 228, 100, 28) };
+        browse.Click += (_, _) =>
+        {
+            using var folders = new FolderBrowserDialog { Description = "Folder where MP3s are saved", UseDescriptionForTitle = true };
+            if (Directory.Exists(pathBox.Text)) folders.SelectedPath = pathBox.Text;
+            if (folders.ShowDialog(dialog) == DialogResult.OK) pathBox.Text = folders.SelectedPath;
+        };
+        saved.SelectedIndexChanged += (_, _) =>
+        {
+            if (saved.SelectedItem is not string picked) return;
+            var entry = catalog.Libraries.FirstOrDefault(item => item.Name.Equals(picked, StringComparison.OrdinalIgnoreCase));
+            if (entry == null) return;
+            nameBox.Text = entry.Name;
+            pathBox.Text = entry.Path;
+        };
+        var save = new Button { Text = "Use this folder", Bounds = new Rectangle(16, 280, 200, 36) };
+        var cancel = new Button { Text = "Cancel", Bounds = new Rectangle(228, 280, 120, 36), DialogResult = DialogResult.Cancel };
+        save.Click += (_, _) =>
+        {
+            var problem = LibraryNames.Problem(nameBox.Text);
+            if (problem != null)
+            {
+                MessageBox.Show(dialog, problem);
+                return;
+            }
+            if (!Directory.Exists(pathBox.Text.Trim()))
+            {
+                MessageBox.Show(dialog, "That folder is not on this PC.");
+                return;
+            }
+            dialog.Tag = true;
+            dialog.Close();
+        };
+        dialog.Controls.AddRange([
+            new Label { Text = "Saved libraries", Bounds = new Rectangle(16, 12, 428, 20) },
+            saved,
+            new Label { Text = "Name", Bounds = new Rectangle(16, 154, 428, 20) },
+            nameBox,
+            new Label { Text = "Folder", Bounds = new Rectangle(16, 208, 428, 20) },
+            pathBox,
+            browse,
+            save,
+            cancel,
+        ]);
+        dialog.CancelButton = cancel;
+        dialog.ShowDialog(this);
+        if (dialog.Tag is not true) return;
+        var libraryName = nameBox.Text.Trim();
+        var folderPath = pathBox.Text.Trim();
+        try
+        {
+            SwitchLibrary(catalog, libraryName, folderPath);
+        }
+        catch (Exception error)
+        {
+            MessageBox.Show(this, error.Message, "YT to PC");
+            return;
+        }
         _warned = false;
         RefreshLabels();
+        if (_settings.ChecksEnabled) _ = TickAsync();
+    }
+
+    private void SwitchLibrary(LibraryCatalog catalog, string libraryName, string folderPath)
+    {
+        var book = new LibraryBook(_settings);
+        var previousName = _settings.LibraryName;
+        var target = book.ReadLibrary(libraryName);
+        var fresh = target.Folders.Count == 0 && target.Commands.Count == 0;
+        if (fresh && !string.IsNullOrWhiteSpace(previousName))
+        {
+            var previous = book.ReadLibrary(previousName);
+            if (previous.Commands.Count > 0) target.Commands = previous.Commands;
+        }
+        target.LibraryName = libraryName;
+        target.LibraryRoot = folderPath;
+        target.LibraryReady = true;
+        book.WriteLibrary(libraryName, target);
+        var entry = catalog.Libraries.FirstOrDefault(item => item.Name.Equals(libraryName, StringComparison.OrdinalIgnoreCase));
+        if (entry == null) catalog.Libraries.Add(new LibraryEntry { Name = libraryName, Path = folderPath });
+        else entry.Path = folderPath;
+        catalog.Active = libraryName;
+        book.Write(catalog);
+        _settings.LibraryName = libraryName;
+        _settings.MusicPath = folderPath;
+        _settings.Save();
+        _worker.ForgetSaved();
     }
 
     private void RefreshLabels()
     {
         var missing = _worker.MissingMusicPath;
         _toggle.Text = _settings.ChecksEnabled ? "Pause checks" : "Resume checks";
-        _status.Text = _settings.ChecksEnabled ? _worker.Status : "Checks are off. Nothing is downloading.";
-        _music.Text = missing.Length == 0 ? "Music: " + _settings.MusicPath : missing;
+        var status = _settings.ChecksEnabled ? _worker.Status : "Checks are off. Nothing is downloading.";
+        _status.Text = status;
+        var progress = _settings.ChecksEnabled ? _worker.ProgressPercent : -1;
+        _progress.Visible = progress >= 0;
+        if (progress >= 0) _progress.Value = progress;
+        var musicName = string.IsNullOrWhiteSpace(_settings.LibraryName) ? "Music" : _settings.LibraryName;
+        _music.Text = missing.Length == 0 ? musicName + ": " + _settings.MusicPath : missing;
         _music.ForeColor = missing.Length == 0 ? Color.Black : Color.DarkRed;
         _queue.Text = string.IsNullOrWhiteSpace(_settings.DriveFolderName)
             ? "Queue folder: not chosen yet"
             : "Queue: " + _settings.DriveFolderName;
-        _tray.Text = _settings.ChecksEnabled ? "YT to PC — checks on" : "YT to PC — checks off";
+        var tip = status.Length <= 120 ? status : status[..120];
+        _tray.Text = tip;
     }
 
     private void ExitApplication()
