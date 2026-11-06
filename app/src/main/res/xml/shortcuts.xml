@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <share-target android:targetClass="app.yttopc.MainActivity">
+        <data android:mimeType="text/plain" />
+        <category android:name="app.yttopc.share.QUEUE" />
+    </share-target>
+    <shortcut
+        android:shortcutId="queue"
+        android:enabled="true"
+        android:icon="@mipmap/ic_launcher"
+        android:shortcutShortLabel="@string/share_shortcut"
+        android:shortcutLongLabel="@string/share_shortcut_long">
+        <intent
+            android:action="android.intent.action.SEND"
+            android:targetPackage="app.yttopc"
+            android:targetClass="app.yttopc.MainActivity" />
+        <categories>
+            <category android:name="app.yttopc.share.QUEUE" />
+        </categories>
+    </shortcut>
+</shortcuts>

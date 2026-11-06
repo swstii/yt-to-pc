@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="ic_background">#12140F</color>
+    <style name="Theme.YtToPc" parent="android:Theme.Material.NoActionBar">
+        <item name="android:statusBarColor">#12140F</item>
+        <item name="android:navigationBarColor">#12140F</item>
+        <item name="android:windowBackground">#12140F</item>
+    </style>
+</resources>
