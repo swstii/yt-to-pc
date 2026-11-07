@@ -67,6 +67,9 @@ sealed class LibraryBook
     public void WriteLibrary(string? name, LibraryState state) =>
         WriteNested(LibraryNames.Folder(name), "state.json", JsonSerializer.Serialize(state, Notebook.Json));
 
+    public void WriteStorage(string? name, string text) =>
+        WriteNested(LibraryNames.Folder(name), "storage.json", text);
+
     private string? ReadNested(string libraryFolder, string name)
     {
         if (!string.IsNullOrWhiteSpace(_settings.DriveFolderId))

@@ -8,7 +8,8 @@ sealed class QueueWorker
     private readonly AudioDownloader _downloader;
     private int _running;
     private INotebookStore? _notebook;
-    private string _lastSaved = "";
+    private string _lastUploaded = "";
+    private string _lastLocal = "";
 
     private INotebookStore? OpenNotebook()
     {
@@ -19,12 +20,77 @@ sealed class QueueWorker
 
     private void Save(LibraryState state, bool force = false)
     {
-        var text = JsonSerializer.Serialize(state, Notebook.Json);
-        if (!force && text == _lastSaved) return;
-        _notebook!.WriteState(state);
-        _lastSaved = text;
+        WriteLocal(state);
+        if (force) Publish(state);
     }
-    private LibraryState Load() => _notebook!.ReadState();
+
+    private string LocalStatePath()
+    {
+        var name = LibraryNames.Folder(_settings.LibraryName);
+        foreach (var invalid in Path.GetInvalidFileNameChars()) name = name.Replace(invalid, '_');
+        return Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "yt-to-pc",
+            "local-state",
+            name + ".json");
+    }
+
+    private void WriteLocal(LibraryState state)
+    {
+        var text = JsonSerializer.Serialize(state, Notebook.Json);
+        if (text == _lastLocal) return;
+        var path = LocalStatePath();
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        var temporary = path + ".tmp";
+        File.WriteAllText(temporary, text);
+        File.Move(temporary, path, true);
+        _lastLocal = text;
+    }
+
+    private LibraryState LoadWorking()
+    {
+        var path = LocalStatePath();
+        if (File.Exists(path))
+        {
+            try
+            {
+                var state = Notebook.ParseState(File.ReadAllText(path));
+                foreach (var folder in state.Folders)
+                {
+                    foreach (var track in folder.Tracks)
+                    {
+                        if (track.Status == "downloading") track.Status = "pending";
+                    }
+                }
+                return state;
+            }
+            catch
+            {
+                // A broken local file falls back to the last copy Drive has.
+            }
+        }
+        return _notebook!.ReadState();
+    }
+
+    private void Publish(LibraryState state)
+    {
+        var text = JsonSerializer.Serialize(state, Notebook.Json);
+        if (text == _lastUploaded) return;
+        if (_lastUploaded.Length == 0)
+        {
+            var remote = JsonSerializer.Serialize(_notebook!.ReadState(), Notebook.Json);
+            if (remote == text)
+            {
+                _lastUploaded = text;
+                return;
+            }
+        }
+        SetStatus("Updating Drive");
+        _notebook!.WriteState(state);
+        _lastUploaded = text;
+    }
+
+    private LibraryState Load() => LoadWorking();
     private List<JobCommand> LoadCommands() => _notebook!.ReadCommands();
 
     public QueueWorker(AppSettings settings)
@@ -34,6 +100,8 @@ sealed class QueueWorker
     }
 
     public string Status { get; private set; } = "Idle";
+    public string Phase { get; private set; } = "IDLE";
+    public string Song { get; private set; } = "";
     public int ProgressPercent { get; private set; } = -1;
     public event Action? StatusChanged;
 
@@ -42,15 +110,49 @@ sealed class QueueWorker
         if (Status == status && ProgressPercent == progress) return;
         Status = status;
         ProgressPercent = progress;
+        (Phase, Song) = Describe(status);
         StatusChanged?.Invoke();
     }
 
     public string MissingMusicPath =>
         Directory.Exists(_settings.MusicPath) ? "" : _settings.MusicPath + " is not available. Check that the drive is connected.";
 
+    public void NoteMissing() => SetStatus(MissingMusicPath);
+
     public void NoteUnreachable() => SetStatus("Can't reach Google. YT to PC is waiting for the internet.");
 
-    public void ForgetSaved() => _lastSaved = "";
+    private static (string Phase, string Song) Describe(string status)
+    {
+        if (status.StartsWith("Downloading ", StringComparison.Ordinal))
+        {
+            var song = status["Downloading ".Length..];
+            var colon = song.LastIndexOf(':');
+            if (colon > 0) song = song[..colon];
+            return ("DOWNLOAD", song.Trim());
+        }
+        if (status.StartsWith("Saving ", StringComparison.Ordinal) && status.EndsWith(" as MP3", StringComparison.Ordinal))
+            return ("DOWNLOAD", status["Saving ".Length..^" as MP3".Length].Trim());
+        if (status.StartsWith("Saved ", StringComparison.Ordinal))
+            return ("SAVED", status["Saved ".Length..].Trim());
+        if (status.StartsWith("Already in this folder: ", StringComparison.Ordinal))
+            return ("SAVED", status["Already in this folder: ".Length..].Trim());
+        if (status == "Idle") return ("IDLE", "");
+        if (status is "Scanning Drive" or "Checking the music folder" or "Reading playlist" || status.StartsWith("Updating Drive", StringComparison.Ordinal))
+            return ("SCAN", "");
+        if (status.StartsWith("Can't reach Google", StringComparison.Ordinal)) return ("OFFLINE", "");
+        if (status.Contains("is not available", StringComparison.Ordinal)) return ("NO DISK", "");
+        if (status is "Checks paused" || status.StartsWith("Checks are off", StringComparison.Ordinal)) return ("PAUSED", "");
+        if (status.Contains("failed", StringComparison.OrdinalIgnoreCase) || status.Contains("not found", StringComparison.OrdinalIgnoreCase))
+            return ("ERROR", "");
+        if (status == "Playlist queued") return ("QUEUED", "");
+        return ("BUSY", "");
+    }
+
+    public void ForgetSaved()
+    {
+        _lastUploaded = "";
+        _lastLocal = "";
+    }
 
     public async Task TickAsync(CancellationToken cancellationToken)
     {
@@ -95,34 +197,58 @@ sealed class QueueWorker
             return;
         }
 
-        SetStatus("Scanning Drive");
-        var commands = LoadCommands();
-        var state = Load();
+        var state = LoadWorking();
         state.LibraryName = ActiveLibraryName();
         state.LibraryRoot = _settings.MusicPath;
         state.LibraryReady = true;
-        SetStatus("Checking the music folder");
-        var changes = SyncFolders(state, commands);
-        var commandNotes = ApplyFastCommands(state, commands);
-        var update = Summarize(changes.Concat(commandNotes).Where(note => note.Length > 0).ToList());
-        if (update.Length > 0) SetStatus("Updating Drive: " + update);
-        Save(state, force: true);
-        cancellationToken.ThrowIfCancellationRequested();
 
-        var video = NextVideo(commands, state);
-        if (video != null)
+        while (!cancellationToken.IsCancellationRequested)
         {
-            await DownloadVideoAsync(state, video, cancellationToken);
-            return;
+            SetStatus("Scanning Drive");
+            var commands = LoadCommands();
+            SetStatus("Checking the music folder");
+            var changes = SyncFolders(state, commands);
+            RecordStorage();
+            var commandNotes = ApplyFastCommands(state, commands);
+            var update = Summarize(changes.Concat(commandNotes).Where(note => note.Length > 0).ToList());
+            if (update.Length > 0) SetStatus("Updating Drive: " + update);
+            Save(state, force: true);
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var busy = await DownloadUntilAsync(state, commands, TimeSpan.FromSeconds(60), cancellationToken);
+            if (!busy)
+            {
+                Save(state, force: true);
+                SetStatus("Idle");
+                return;
+            }
         }
-        var playlist = commands.FirstOrDefault(command =>
-            command.Type == "enqueue-playlist" && !state.Commands.ContainsKey(command.Id));
-        if (playlist != null)
+    }
+
+    private async Task<bool> DownloadUntilAsync(LibraryState state, List<JobCommand> commands, TimeSpan budget, CancellationToken cancellationToken)
+    {
+        var until = DateTime.UtcNow + budget;
+        while (DateTime.UtcNow < until)
         {
-            await ExpandPlaylistAsync(state, playlist, cancellationToken);
-            return;
+            cancellationToken.ThrowIfCancellationRequested();
+            var video = NextVideo(commands, state);
+            if (video != null)
+            {
+                await DownloadVideoAsync(state, video, cancellationToken);
+                WriteLocal(state);
+                continue;
+            }
+            var playlist = commands.FirstOrDefault(command =>
+                command.Type == "enqueue-playlist" && !state.Commands.ContainsKey(command.Id));
+            if (playlist != null)
+            {
+                await ExpandPlaylistAsync(state, playlist, cancellationToken);
+                WriteLocal(state);
+                continue;
+            }
+            return false;
         }
-        if (update.Length == 0) SetStatus("Idle");
+        return true;
     }
 
     private void WriteUnavailable()
@@ -132,7 +258,7 @@ sealed class QueueWorker
         state.LibraryName = ActiveLibraryName();
         state.LibraryRoot = _settings.MusicPath;
         state.LibraryReady = false;
-        Save(state);
+        Save(state, force: true);
     }
 
     private void PublishReadyShell()
@@ -142,7 +268,53 @@ sealed class QueueWorker
         state.LibraryRoot = _settings.MusicPath;
         state.LibraryReady = true;
         SyncFolders(state, LoadCommands());
-        Save(state);
+        RecordStorage();
+        Save(state, force: true);
+    }
+
+    private void RecordStorage()
+    {
+        if (_notebook == null || !Directory.Exists(_settings.MusicPath)) return;
+        var folders = new List<StorageFolder>();
+        foreach (var directory in Directory.GetDirectories(_settings.MusicPath))
+        {
+            var name = Path.GetFileName(directory);
+            if (string.IsNullOrWhiteSpace(name) || name.Equals("_queue", StringComparison.OrdinalIgnoreCase)) continue;
+            folders.Add(new StorageFolder(name, DirectoryBytes(directory)));
+        }
+        folders.Sort((left, right) => string.Compare(left.Name, right.Name, StringComparison.OrdinalIgnoreCase));
+        var report = new StorageFile(_settings.MusicPath, DirectoryBytes(_settings.MusicPath), folders);
+        new LibraryBook(_settings).WriteStorage(_settings.LibraryName, JsonSerializer.Serialize(report, Notebook.Json));
+    }
+
+    private static long DirectoryBytes(string path)
+    {
+        long total = 0;
+        try
+        {
+            foreach (var file in Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories))
+            {
+                try { total += new FileInfo(file).Length; }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+        return total;
+    }
+
+    private sealed class StorageFile(string root, long totalBytes, List<StorageFolder> folders)
+    {
+        public string Root { get; } = root;
+        public long TotalBytes { get; } = totalBytes;
+        public List<StorageFolder> Folders { get; } = folders;
+    }
+
+    private sealed class StorageFolder(string name, long bytes)
+    {
+        public string Name { get; } = name;
+        public long Bytes { get; } = bytes;
     }
 
     private List<string> SyncFolders(LibraryState state, List<JobCommand> commands)
@@ -470,6 +642,7 @@ sealed class QueueWorker
         catch (OperationCanceledException)
         {
             track.Status = "pending";
+            WriteLocal(state);
             SetStatus("Checks paused");
             throw;
         }

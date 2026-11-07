@@ -35,12 +35,21 @@ data class FolderView(
         get() = !removePending && albums.none { it.blocksRemoval() } && tracks.none { it.blocksRemoval() }
 }
 
+data class StatusItem(
+    val at: String,
+    val kind: String,
+    val title: String,
+    val folder: String,
+    val videoId: String? = null,
+)
+
 data class LibraryView(
     val libraryRoot: String?,
     val pendingLibraryRoot: String?,
     val libraryReady: Boolean,
     val folders: List<FolderView>,
     val libraryName: String? = null,
+    val activity: List<StatusItem> = emptyList(),
 )
 
 fun LibraryView.withKnownTitles(titles: Map<String, String>): LibraryView = copy(
@@ -59,6 +68,14 @@ fun LibraryView.withKnownTitles(titles: Map<String, String>): LibraryView = copy
                 if (!better.isNullOrBlank() && album.title.isBlank()) album.copy(title = better) else album
             },
         )
+    },
+    activity = activity.map { item ->
+        val better = item.videoId?.let { titles[it] }
+        if (!better.isNullOrBlank() && (item.title.isBlank() || item.title == item.videoId)) {
+            item.copy(title = better)
+        } else {
+            item
+        }
     },
 )
 
@@ -115,7 +132,76 @@ fun merge(commands: List<Command>, state: LibraryState): LibraryView {
         libraryReady = state.libraryReady && pendingRoot == null,
         folders = folders,
         libraryName = state.libraryName,
+        activity = waitingWork(commands, state, builders),
     )
+}
+
+private fun waitingWork(commands: List<Command>, state: LibraryState, builders: List<FolderBuilder>): List<StatusItem> {
+    val activity = mutableListOf<StatusItem>()
+    val seen = mutableSetOf<String>()
+    fun key(folder: String, id: String) = folder.lowercase() + "\n" + id
+    for (command in commands) {
+        val recorded = state.commands[command.id]
+        val waiting = recorded == null || recorded.status == ItemStatus.PENDING || recorded.status == ItemStatus.DOWNLOADING
+        if (!waiting) continue
+        when (command) {
+            is Command.EnqueueVideo -> {
+                val track = builders.find { FolderNames.same(it.name, command.folder) }
+                    ?.tracks?.find { it.videoId == command.videoId }
+                val title = track?.title?.takeIf { it.isNotBlank() } ?: command.videoId
+                val kind = if (track?.status == ItemStatus.DOWNLOADING) "Downloading" else "Download"
+                activity += StatusItem(command.at, kind, title, command.folder, command.videoId)
+                seen += key(command.folder, command.videoId)
+            }
+            is Command.EnqueuePlaylist -> {
+                val album = builders.find { FolderNames.same(it.name, command.folder) }
+                    ?.albums?.find { it.commandId == command.id }
+                val title = album?.title?.takeIf { it.isNotBlank() } ?: "Playlist"
+                activity += StatusItem(command.at, "Download", title, command.folder, command.playlistId)
+            }
+            is Command.MakeFolder -> activity += StatusItem(command.at, "Folder", command.folder, "")
+            is Command.RemoveFolder -> activity += StatusItem(command.at, "Delete", command.folder, "")
+            is Command.DeleteTrack -> {
+                val track = builders.find { FolderNames.same(it.name, command.folder) }
+                    ?.tracks?.find { it.videoId == command.videoId }
+                val title = track?.title?.takeIf { it.isNotBlank() } ?: command.videoId
+                activity += StatusItem(command.at, "Delete", title, command.folder, command.videoId)
+                seen += key(command.folder, command.videoId)
+            }
+            is Command.Retry -> {
+                val home = builders.find { builder ->
+                    builder.tracks.any { it.commandId == command.commandId } ||
+                        builder.albums.any { it.commandId == command.commandId }
+                }
+                val track = home?.tracks?.find { it.commandId == command.commandId }
+                val album = home?.albums?.find { it.commandId == command.commandId }
+                val title = track?.title?.takeIf { it.isNotBlank() }
+                    ?: album?.title?.takeIf { it.isNotBlank() }
+                    ?: "Retry"
+                val videoId = track?.videoId ?: album?.playlistId
+                activity += StatusItem(command.at, "Download", title, home?.name ?: "", videoId)
+                if (home != null && track != null) seen += key(home.name, track.videoId)
+            }
+            is Command.SetLibraryRoot -> Unit
+        }
+    }
+    for (builder in builders) {
+        if (builder.createPending && activity.none { it.kind == "Folder" && it.title.equals(builder.name, ignoreCase = true) }) {
+            activity += StatusItem("", "Folder", builder.name, "")
+        }
+        if (builder.removePending && activity.none { it.kind == "Delete" && it.folder.isEmpty() && it.title.equals(builder.name, ignoreCase = true) }) {
+            activity += StatusItem("", "Delete", builder.name, "")
+        }
+        for (track in builder.tracks) {
+            if (key(builder.name, track.videoId) in seen) continue
+            when {
+                track.deletePending -> activity += StatusItem("", "Delete", track.title, builder.name, track.videoId)
+                track.status == ItemStatus.DOWNLOADING -> activity += StatusItem("", "Downloading", track.title, builder.name, track.videoId)
+                track.status == ItemStatus.PENDING -> activity += StatusItem("", "Download", track.title, builder.name, track.videoId)
+            }
+        }
+    }
+    return activity
 }
 
 private class FolderBuilder(val name: String) {

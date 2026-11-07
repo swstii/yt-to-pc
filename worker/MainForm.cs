@@ -8,9 +8,11 @@ sealed class MainForm : Form
     private readonly QueueWorker _worker;
     private readonly System.Windows.Forms.Timer _timer = new();
     private readonly NotifyIcon _tray = new();
-    private readonly Label _status = new() { AutoSize = false };
+    private readonly Label _phase = new() { AutoSize = false, Font = new Font("Segoe UI", 16f, FontStyle.Bold) };
     private readonly ProgressBar _progress = new() { Minimum = 0, Maximum = 100 };
-    private readonly Label _music = new();
+    private readonly Label _song = new() { AutoSize = false };
+    private readonly Label _library = new() { AutoSize = false, Font = new Font("Segoe UI", 10f, FontStyle.Bold) };
+    private readonly Label _path = new() { AutoSize = false };
     private readonly Label _queue = new();
     private readonly Button _toggle = new();
     private readonly CheckBox _startup = new();
@@ -24,25 +26,29 @@ sealed class MainForm : Form
         Text = "YT to PC";
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
-        ClientSize = new Size(480, 340);
+        ClientSize = new Size(480, 392);
         StartPosition = FormStartPosition.CenterScreen;
         _worker.StatusChanged += () =>
         {
             if (IsHandleCreated) BeginInvoke(RefreshLabels);
         };
 
-        _status.SetBounds(20, 16, 440, 72);
-        _progress.SetBounds(20, 92, 440, 18);
-        _music.SetBounds(20, 118, 440, 36);
-        _queue.SetBounds(20, 156, 440, 28);
-        _toggle.SetBounds(20, 196, 210, 36);
+        _phase.SetBounds(20, 16, 440, 32);
+        _progress.SetBounds(20, 54, 440, 18);
+        _song.SetBounds(20, 78, 440, 24);
+        _library.SetBounds(20, 112, 440, 22);
+        _path.SetBounds(20, 136, 440, 36);
+        _queue.SetBounds(20, 176, 440, 24);
+        _toggle.SetBounds(20, 212, 210, 36);
         _toggle.Click += (_, _) => SetChecks(!_settings.ChecksEnabled);
-        var chooseQueue = new Button { Text = "Queue folder", Bounds = new Rectangle(246, 196, 210, 36) };
+        var chooseQueue = new Button { Text = "Queue folder", Bounds = new Rectangle(246, 212, 210, 36) };
         chooseQueue.Click += (_, _) => ChooseQueue();
-        var chooseMusic = new Button { Text = "Music folder", Bounds = new Rectangle(20, 248, 210, 36) };
+        var chooseMusic = new Button { Text = "Music folder", Bounds = new Rectangle(20, 260, 210, 36) };
         chooseMusic.Click += (_, _) => ChooseMusic();
+        var reload = new Button { Text = "Reload", Bounds = new Rectangle(246, 260, 210, 36) };
+        reload.Click += (_, _) => Reload();
         _startup.Text = "Start with Windows";
-        _startup.SetBounds(246, 252, 210, 28);
+        _startup.SetBounds(20, 312, 210, 28);
         _startup.Checked = _settings.StartWithWindows;
         _startup.CheckedChanged += (_, _) =>
         {
@@ -51,7 +57,7 @@ sealed class MainForm : Form
             SetStartup(_startup.Checked);
         };
 
-        Controls.AddRange([_status, _progress, _music, _queue, _toggle, chooseQueue, chooseMusic, _startup]);
+        Controls.AddRange([_phase, _progress, _song, _library, _path, _queue, _toggle, chooseQueue, chooseMusic, reload, _startup]);
 
         var icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
         if (icon != null) Icon = icon;
@@ -64,6 +70,7 @@ sealed class MainForm : Form
         _tray.DoubleClick += (_, _) => ShowAgain();
         var menu = new ContextMenuStrip();
         menu.Items.Add("Open", null, (_, _) => ShowAgain());
+        menu.Items.Add("Reload", null, (_, _) => Reload());
         menu.Items.Add("Pause or resume checks", null, (_, _) => SetChecks(!_settings.ChecksEnabled));
         menu.Items.Add("Exit", null, (_, _) => ExitApplication());
         _tray.ContextMenuStrip = menu;
@@ -115,9 +122,33 @@ sealed class MainForm : Form
         Activate();
     }
 
+    private void Reload()
+    {
+        _warned = false;
+        if (!_settings.ChecksEnabled)
+        {
+            if (_worker.MissingMusicPath.Length > 0) _worker.NoteMissing();
+            RefreshLabels();
+            return;
+        }
+        _ = TickAsync();
+    }
+
     private async Task TickAsync()
     {
         if (!_settings.ChecksEnabled) return;
+        if (_worker.MissingMusicPath.Length > 0)
+        {
+            _worker.NoteMissing();
+            RefreshLabels();
+            if (!_warned)
+            {
+                _warned = true;
+                _tray.ShowBalloonTip(4000, "YT to PC", _worker.MissingMusicPath, ToolTipIcon.Warning);
+            }
+            return;
+        }
+        _warned = false;
         if (!await NetworkGate.DriveReachableAsync())
         {
             _worker.NoteUnreachable();
@@ -131,18 +162,6 @@ sealed class MainForm : Form
         }
         _offlineShown = false;
         RefreshLabels();
-        if (_settings.ChecksEnabled && _worker.MissingMusicPath.Length > 0)
-        {
-            if (!_warned)
-            {
-                _warned = true;
-                _tray.ShowBalloonTip(4000, "YT to PC", _worker.MissingMusicPath, ToolTipIcon.Warning);
-            }
-        }
-        else
-        {
-            _warned = false;
-        }
         await _worker.TickAsync(_run.Token);
         RefreshLabels();
     }
@@ -350,19 +369,21 @@ sealed class MainForm : Form
     {
         var missing = _worker.MissingMusicPath;
         _toggle.Text = _settings.ChecksEnabled ? "Pause checks" : "Resume checks";
-        var status = _settings.ChecksEnabled ? _worker.Status : "Checks are off. Nothing is downloading.";
-        _status.Text = status;
-        var progress = _settings.ChecksEnabled ? _worker.ProgressPercent : -1;
-        _progress.Visible = progress >= 0;
-        if (progress >= 0) _progress.Value = progress;
+        var phase = !_settings.ChecksEnabled ? "PAUSED" : missing.Length > 0 ? "NO DISK" : _worker.Phase;
+        var song = _settings.ChecksEnabled && missing.Length == 0 ? _worker.Song : "";
+        _phase.Text = phase;
+        _song.Text = song;
+        var progress = _settings.ChecksEnabled && missing.Length == 0 ? _worker.ProgressPercent : 0;
+        _progress.Value = Math.Clamp(progress, 0, 100);
         var musicName = string.IsNullOrWhiteSpace(_settings.LibraryName) ? "Music" : _settings.LibraryName;
-        _music.Text = missing.Length == 0 ? musicName + ": " + _settings.MusicPath : missing;
-        _music.ForeColor = missing.Length == 0 ? Color.Black : Color.DarkRed;
+        _library.Text = musicName;
+        _path.Text = missing.Length == 0 ? _settings.MusicPath : missing;
+        _path.ForeColor = missing.Length == 0 ? Color.Black : Color.DarkRed;
         _queue.Text = string.IsNullOrWhiteSpace(_settings.DriveFolderName)
             ? "Queue folder: not chosen yet"
             : "Queue: " + _settings.DriveFolderName;
-        var tip = status.Length <= 120 ? status : status[..120];
-        _tray.Text = tip;
+        var tip = song.Length == 0 ? phase : phase + "  " + song;
+        _tray.Text = tip.Length <= 120 ? tip : tip[..120];
     }
 
     private void ExitApplication()

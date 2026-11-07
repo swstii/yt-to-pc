@@ -8,7 +8,7 @@ import org.json.JSONObject
 
 sealed class LoadedNotebook {
     data object Missing : LoadedNotebook()
-    data class Ready(val commands: List<Command>, val state: LibraryState) : LoadedNotebook()
+    data class Ready(val commands: List<Command>, val state: LibraryState, val storage: StorageReport? = null) : LoadedNotebook()
     data class Failed(val reason: String) : LoadedNotebook()
 }
 
@@ -43,19 +43,24 @@ class NotebookRepository(context: Context) {
                     ?: DriveFiles.readNamed(token, folderId, legacyStateName(active))
                     ?: if (active == null) null else DriveFiles.readNamed(token, folderId, STATE)
                 val state = if (stateText.isNullOrBlank()) LibraryState() else NotebookJson.readState(stateText)
-                LoadedNotebook.Ready(commands, state)
+                val storage = readStorage(token, folderId, active)?.let(::parseStorage)
+                LoadedNotebook.Ready(commands, state, storage)
             }
         } catch (error: Exception) {
             LoadedNotebook.Failed(error.message ?: "Could not read the queue.")
         }
     }
 
-    fun append(token: String, command: Command) {
+    fun append(token: String, command: Command) = appendAll(token, listOf(command))
+
+    fun appendAll(token: String, commands: List<Command>) {
+        if (commands.isEmpty()) return
         val folderId = folderId() ?: error("Choose the Drive folder first.")
         synchronized(lock) {
             val existing = DriveFiles.readNamed(token, folderId, COMMANDS).orEmpty()
             val body = if (existing.isEmpty() || existing.endsWith("\n")) existing else "$existing\n"
-            DriveFiles.writeNamed(token, folderId, COMMANDS, body + NotebookJson.commandLine(command) + "\n")
+            val lines = commands.joinToString("") { NotebookJson.commandLine(it) + "\n" }
+            DriveFiles.writeNamed(token, folderId, COMMANDS, body + lines)
         }
     }
 
@@ -65,6 +70,7 @@ class NotebookRepository(context: Context) {
         const val KEY_FOLDER_NAME = "drive_folder_name"
         const val COMMANDS = "commands.jsonl"
         const val STATE = "state.json"
+        const val STORAGE = "storage.json"
         const val LIBRARIES = "libraries.json"
 
         fun activeLibrary(catalog: String?): String? {
@@ -84,5 +90,31 @@ class NotebookRepository(context: Context) {
             val library = DriveFiles.findFolder(token, stateRoot, active) ?: return null
             return DriveFiles.readNamed(token, library, STATE)
         }
+
+        fun readStorage(token: String, folderId: String, active: String?): String? {
+            val stateRoot = DriveFiles.findFolder(token, folderId, "state") ?: return null
+            val libraryName = active?.takeIf { it.isNotBlank() } ?: "Library"
+            val library = DriveFiles.findFolder(token, stateRoot, libraryName) ?: return null
+            return DriveFiles.readNamed(token, library, STORAGE)
+        }
+
+        fun parseStorage(text: String): StorageReport? = try {
+            val json = JSONObject(text)
+            val folders = json.optJSONArray("folders")
+            val sizes = mutableListOf<FolderSize>()
+            if (folders != null) {
+                for (index in 0 until folders.length()) {
+                    val folder = folders.getJSONObject(index)
+                    sizes += FolderSize(folder.optString("name"), folder.optLong("bytes"))
+                }
+            }
+            StorageReport(json.optString("root"), json.optLong("totalBytes"), sizes)
+        } catch (_: Exception) {
+            null
+        }
     }
 }
+
+data class FolderSize(val name: String, val bytes: Long)
+
+data class StorageReport(val root: String, val totalBytes: Long, val folders: List<FolderSize>)

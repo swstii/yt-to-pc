@@ -26,18 +26,25 @@ import app.yttopc.data.Reachability
 import app.yttopc.data.YoutubeTitles
 import app.yttopc.data.await
 import com.google.android.gms.auth.api.identity.Identity
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.net.ConnectException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 
 sealed interface Screen {
     data object Home : Screen
     data class Folder(val name: String, val focusVideoId: String? = null, val focusCommandId: String? = null) : Screen
     data class Share(val text: String, val folder: String? = null) : Screen
     data object Settings : Screen
+    data object Status : Screen
 }
 
 data class UiState(
@@ -51,6 +58,8 @@ data class UiState(
     val screen: Screen = Screen.Home,
     val busy: Boolean = false,
     val offline: Boolean = false,
+    val storage: app.yttopc.data.StorageReport? = null,
+    val lastRefreshed: Long? = null,
 )
 
 class AppViewModel(app: Application) : AndroidViewModel(app) {
@@ -58,6 +67,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private val backStack = ArrayDeque<Screen>()
     private val knownTitles = mutableMapOf<String, String>()
     private val missedTitles = mutableSetOf<String>()
+    private var refreshJob: Job? = null
+    private var refreshGeneration = 0
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state
 
@@ -66,10 +77,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun refresh() {
-        viewModelScope.launch {
-            val online = withContext(Dispatchers.IO) { Reachability.driveReachable() }
-            if (!online) {
-                _state.update { it.copy(loading = false, busy = false, offline = true) }
+        val generation = ++refreshGeneration
+        refreshJob?.cancel()
+        refreshJob = viewModelScope.launch {
+            if (!driveReachable()) {
+                showOffline(generation)
                 return@launch
             }
             val folderId = repository.folderId()
@@ -101,15 +113,19 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     LoadedNotebook.Missing -> _state.update {
                         it.copy(loading = false, busy = false, signedIn = true, notebookChosen = false)
                     }
-                    is LoadedNotebook.Failed -> _state.update {
-                        it.copy(
-                            loading = false,
-                            busy = false,
-                            signedIn = true,
-                            notebookChosen = true,
-                            driveFolderName = folderName,
-                            message = loaded.reason,
-                        )
+                    is LoadedNotebook.Failed -> if (networkFailure(loaded.reason)) {
+                        showOffline(generation)
+                    } else {
+                        _state.update {
+                            it.copy(
+                                loading = false,
+                                busy = it.busy,
+                                signedIn = true,
+                                notebookChosen = true,
+                                driveFolderName = folderName,
+                                message = loaded.reason,
+                            )
+                        }
                     }
                     is LoadedNotebook.Ready -> _state.update {
                         it.copy(
@@ -117,16 +133,24 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                             busy = it.busy,
                             signedIn = true,
                             notebookChosen = true,
+                            offline = false,
                             driveFolderName = folderName,
                             library = present(Queue(loaded.commands, loaded.state).view),
+                            storage = loaded.storage ?: it.storage,
+                            lastRefreshed = System.currentTimeMillis(),
                         )
                     }
                 }
             } catch (error: Exception) {
+                if (error is CancellationException) throw error
+                if (networkFailure(error)) {
+                    showOffline(generation)
+                    return@launch
+                }
                 _state.update {
                     it.copy(
                         loading = false,
-                        busy = false,
+                        busy = it.busy,
                         signedIn = error !is NeedsSignIn && folderId != null,
                         notebookChosen = error !is NeedsSignIn && folderId != null,
                         driveFolderName = folderName,
@@ -135,6 +159,36 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
         }
+    }
+
+    /** The first lookup after the app resumes often fails before the network is ready. */
+    private suspend fun driveReachable(): Boolean {
+        if (withContext(Dispatchers.IO) { Reachability.driveReachable() }) return true
+        delay(800)
+        return withContext(Dispatchers.IO) { Reachability.driveReachable() }
+    }
+
+    private fun showOffline(generation: Int) {
+        if (generation != refreshGeneration) return
+        _state.update {
+            if (generation != refreshGeneration) return@update it
+            it.copy(loading = false, offline = true, message = it.message?.takeUnless { text -> networkFailure(text) })
+        }
+    }
+
+    private fun networkFailure(error: Throwable): Boolean {
+        var current: Throwable? = error
+        while (current != null) {
+            if (current is UnknownHostException || current is ConnectException || current is SocketTimeoutException) return true
+            if (networkFailure(current.message)) return true
+            current = current.cause
+        }
+        return false
+    }
+
+    private fun networkFailure(reason: String?): Boolean {
+        val text = reason?.lowercase() ?: return false
+        return "unable to resolve host" in text || "failed to connect" in text || "network is unreachable" in text || "timed out" in text
     }
 
     fun beginSignIn(launch: (IntentSenderRequest) -> Unit) {
@@ -286,7 +340,63 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun removeFolder(name: String) = submit("Folder will be deleted when it is empty on the laptop.", { it.removeFolder(name) })
 
-    fun deleteTrack(folder: String, videoId: String) = submit("Delete queued.", { it.deleteTrack(folder, videoId) })
+    fun deleteTrack(folder: String, videoId: String) = deleteTracks(folder, listOf(videoId))
+
+    fun deleteTracks(folder: String, videoIds: List<String>) {
+        val ids = videoIds.distinct()
+        if (ids.isEmpty() || _state.value.busy) return
+        _state.update { it.copy(busy = true) }
+        viewModelScope.launch {
+            try {
+                val token = DriveAuth.authorize(getApplication()) ?: throw NeedsSignIn()
+                val loaded = withContext(Dispatchers.IO) { repository.load(token) }
+                if (loaded !is LoadedNotebook.Ready) {
+                    _state.update { it.copy(busy = false, message = "Choose the Drive folder first.") }
+                    return@launch
+                }
+                var commands = loaded.commands
+                val fresh = mutableListOf<Command>()
+                for (id in ids) {
+                    when (val result = Queue(commands, loaded.state).deleteTrack(folder, id)) {
+                        is QueueResult.Rejected -> {
+                            if (fresh.isEmpty()) {
+                                _state.update { it.copy(busy = false, message = result.reason) }
+                                return@launch
+                            }
+                        }
+                        is QueueResult.Append -> {
+                            fresh += result.command
+                            commands = commands + result.command
+                        }
+                    }
+                }
+                withContext(Dispatchers.IO) { repository.appendAll(token, fresh) }
+                if (fresh.size == 1) {
+                    announce(fresh.first())
+                } else {
+                    runCatching {
+                        QueueNotifier.show(
+                            getApplication(),
+                            fresh.first().id.hashCode(),
+                            "Delete queued",
+                            "${fresh.size} songs · $folder",
+                        )
+                    }
+                }
+                val again = withContext(Dispatchers.IO) { repository.load(token) }
+                val library = if (again is LoadedNotebook.Ready) {
+                    present(Queue(again.commands, again.state).view)
+                } else {
+                    _state.value.library
+                }
+                val message = if (fresh.size == 1) "Delete queued." else "${fresh.size} deletes queued."
+                _state.update { it.copy(busy = false, library = library, notebookChosen = true, message = message) }
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
+                _state.update { it.copy(busy = false, message = error.message ?: "Could not update the queue.") }
+            }
+        }
+    }
 
     fun retry(commandId: String) = submit("Retry queued.", { it.retry(commandId) })
 
@@ -295,7 +405,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(busy = true) }
         viewModelScope.launch {
             val resolved = if (choice == ShareChoice.SONG) resolvedTitle(text) else null
-            finish("Queued for the laptop.") { it.enqueue(text, folder, choice, resolved) }
+            finish("Queued.", goHome = true) { it.enqueue(text, folder, choice, resolved) }
         }
     }
 
@@ -340,8 +450,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun announce(command: Command) {
         val (title, text) = when (command) {
-            is Command.EnqueueVideo -> "Song queued" to "${songName(command.videoId)} · ${command.folder}"
-            is Command.EnqueuePlaylist -> "Playlist queued" to command.folder
+            is Command.EnqueueVideo -> "Queued" to "${songName(command.videoId)} · ${command.folder}"
+            is Command.EnqueuePlaylist -> "Queued" to command.folder
             is Command.DeleteTrack -> "Delete queued" to "${songName(command.videoId)} · ${command.folder}"
             else -> return
         }
@@ -360,10 +470,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private fun submit(success: String, action: (Queue) -> QueueResult) {
         if (_state.value.busy) return
         _state.update { it.copy(busy = true) }
-        viewModelScope.launch { finish(success, action) }
+        viewModelScope.launch { finish(success, action = action) }
     }
 
-    private suspend fun finish(success: String, action: (Queue) -> QueueResult) {
+    private suspend fun finish(success: String, goHome: Boolean = false, action: (Queue) -> QueueResult) {
             try {
                 val token = DriveAuth.authorize(getApplication()) ?: throw NeedsSignIn()
                 val loaded = withContext(Dispatchers.IO) { repository.load(token) }
@@ -382,8 +492,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                         } else {
                             _state.value.library
                         }
+                        if (goHome) backStack.clear()
                         _state.update {
-                            it.copy(busy = false, library = library, notebookChosen = true, message = success)
+                            it.copy(
+                                busy = false,
+                                library = library,
+                                notebookChosen = true,
+                                message = success,
+                                screen = if (goHome) Screen.Home else it.screen,
+                            )
                         }
                     }
                 }
