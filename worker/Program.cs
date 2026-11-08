@@ -16,6 +16,13 @@ static class Program
         Application.SetHighDpiMode(HighDpiMode.SystemAware);
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
-        Application.Run(new MainForm());
+        try
+        {
+            Application.Run(new MainForm());
+        }
+        catch (Exception error)
+        {
+            MessageBox.Show(error.Message, "YT to PC", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
     }
 }

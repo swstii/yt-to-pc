@@ -117,11 +117,17 @@ private class LoopVideoView(
                 applyFit()
             }
             next.setOnPreparedListener {
-                videoW = it.videoWidth
-                videoH = it.videoHeight
-                applyFit()
-                applySpeed(it)
-                if (playWhenReady) it.start()
+                runCatching {
+                    videoW = it.videoWidth
+                    videoH = it.videoHeight
+                    applyFit()
+                    applySpeed(it)
+                    if (playWhenReady) it.start()
+                }
+            }
+            next.setOnErrorListener { _, _, _ ->
+                releasePlayer()
+                true
             }
             next.prepareAsync()
         } catch (_: Exception) {
@@ -151,9 +157,9 @@ private class LoopVideoView(
             current.setOnPreparedListener(null)
             current.setOnVideoSizeChangedListener(null)
             runCatching { current.reset() }
-            current.release()
+            runCatching { current.release() }
         }
-        output?.release()
+        output?.let { runCatching { it.release() } }
         output = null
     }
 }

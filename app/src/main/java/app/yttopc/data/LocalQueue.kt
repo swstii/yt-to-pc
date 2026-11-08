@@ -49,15 +49,17 @@ class LocalQueue(context: Context) {
     }
 
     private fun save(items: List<PhoneRequest>) {
-        val array = JSONArray()
-        for (item in items) {
-            array.put(
-                JSONObject()
-                    .put("line", NotebookJson.commandLine(item.command))
-                    .put("uploaded", item.uploaded)
-                    .put("rejected", item.rejected ?: ""),
-            )
+        runCatching {
+            val array = JSONArray()
+            for (item in items) {
+                array.put(
+                    JSONObject()
+                        .put("line", NotebookJson.commandLine(item.command))
+                        .put("uploaded", item.uploaded)
+                        .put("rejected", item.rejected ?: ""),
+                )
+            }
+            file.writeText(array.toString())
         }
-        file.writeText(array.toString())
     }
 }

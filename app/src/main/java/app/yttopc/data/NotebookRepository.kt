@@ -66,20 +66,30 @@ class NotebookRepository(context: Context) {
         prefs.edit().putBoolean(KEY_WALLPAPER, on).apply()
     }
 
+    fun accent(): String = prefs.getString(KEY_ACCENT, "pink")?.takeIf { it in AccentKeys } ?: "pink"
+
+    fun setAccent(name: String) {
+        if (name !in AccentKeys) return
+        prefs.edit().putString(KEY_ACCENT, name).apply()
+    }
+
     fun clear() {
         val wallpaper = wallpaperOn()
+        val accent = accent()
         prefs.edit().clear().apply()
-        if (wallpaper) prefs.edit().putBoolean(KEY_WALLPAPER, true).apply()
+        prefs.edit().putBoolean(KEY_WALLPAPER, wallpaper).putString(KEY_ACCENT, accent).apply()
         cacheFile.delete()
     }
 
     private fun remember(commandsText: String, stateText: String, historyText: String, storageText: String?) {
-        val json = JSONObject()
-            .put("commands", commandsText)
-            .put("state", stateText)
-            .put("history", historyText)
-            .put("storage", storageText ?: "")
-        cacheFile.writeText(json.toString())
+        runCatching {
+            val json = JSONObject()
+                .put("commands", commandsText)
+                .put("state", stateText)
+                .put("history", historyText)
+                .put("storage", storageText ?: "")
+            cacheFile.writeText(json.toString())
+        }
     }
 
     fun load(token: String): LoadedNotebook {
@@ -128,6 +138,8 @@ class NotebookRepository(context: Context) {
         const val KEY_FOLDER_NAME = "drive_folder_name"
         const val KEY_LAST_MUSIC_FOLDER = "last_music_folder"
         const val KEY_WALLPAPER = "default_wallpaper"
+        const val KEY_ACCENT = "accent"
+        val AccentKeys = setOf("dark-red", "dark-green", "dark-blue", "pink", "purple", "yellow", "orange")
         const val COMMANDS = "commands.jsonl"
         const val STATE = "state.json"
         const val STORAGE = "storage.json"

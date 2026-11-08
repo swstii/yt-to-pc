@@ -31,11 +31,13 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        model.refresh()
+        runCatching { model.refresh() }
     }
 
     private fun handleShare(intent: Intent?) {
-        if (intent?.action != Intent.ACTION_SEND) return
-        intent.getStringExtra(Intent.EXTRA_TEXT)?.takeIf { it.isNotBlank() }?.let(model::openShare)
+        runCatching {
+            if (intent?.action != Intent.ACTION_SEND) return
+            intent.getStringExtra(Intent.EXTRA_TEXT)?.takeIf { it.isNotBlank() }?.let(model::openShare)
+        }
     }
 }

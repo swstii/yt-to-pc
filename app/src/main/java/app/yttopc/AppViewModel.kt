@@ -67,6 +67,7 @@ data class UiState(
     val storage: app.yttopc.data.StorageReport? = null,
     val lastRefreshed: Long? = null,
     val wallpaper: Boolean = false,
+    val accent: String = "pink",
 )
 
 class AppViewModel(app: Application) : AndroidViewModel(app) {
@@ -78,26 +79,33 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private val missedTitles = mutableSetOf<String>()
     private var refreshJob: Job? = null
     private var refreshGeneration = 0
-    private val _state = MutableStateFlow(UiState(wallpaper = repository.wallpaperOn()))
+    private var primedHistory = false
+    private val seenDone = mutableSetOf<String>()
+    private val _state = MutableStateFlow(UiState(wallpaper = repository.wallpaperOn(), accent = repository.accent()))
     val state: StateFlow<UiState> = _state
 
     init {
-        val cached = repository.cached()
-        if (cached != null && repository.folderId() != null) {
-            localQueue.dropUploaded(cached.commands.map { it.id }.toSet())
-            driveLibrary = Queue(cached.commands, cached.state).view.copy(history = cached.history)
-            _state.value = UiState(
-                loading = false,
-                signedIn = true,
-                notebookChosen = true,
-                driveFolderName = repository.folderName(),
-                library = shown(),
-                storage = cached.storage,
-                wallpaper = repository.wallpaperOn(),
-            )
-        }
-        refresh()
-        flush()
+        runCatching { restoreCachedLibrary() }
+        runCatching { refresh() }
+        runCatching { flush() }
+    }
+
+    private fun restoreCachedLibrary() {
+        val cached = repository.cached() ?: return
+        if (repository.folderId() == null) return
+        localQueue.dropUploaded(cached.commands.map { it.id }.toSet())
+        val view = runCatching { Queue(cached.commands, cached.state).view.copy(history = cached.history) }.getOrNull() ?: return
+        showLibrary(view)
+        _state.value = UiState(
+            loading = false,
+            signedIn = true,
+            notebookChosen = true,
+            driveFolderName = repository.folderName(),
+            library = shown(),
+            storage = cached.storage,
+            wallpaper = repository.wallpaperOn(),
+            accent = repository.accent(),
+        )
     }
 
     fun refresh() {
@@ -153,7 +161,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     is LoadedNotebook.Ready -> {
                         localQueue.dropUploaded(loaded.commands.map { it.id }.toSet())
-                        driveLibrary = Queue(loaded.commands, loaded.state).view.copy(history = loaded.history)
+                        runCatching { showLibrary(Queue(loaded.commands, loaded.state).view.copy(history = loaded.history)) }
                         _state.update {
                             it.copy(
                                 loading = false,
@@ -314,7 +322,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             repository.clear()
             localQueue.clear()
             backStack.clear()
-            _state.value = UiState(loading = false, wallpaper = repository.wallpaperOn())
+            _state.value = UiState(loading = false, wallpaper = repository.wallpaperOn(), accent = repository.accent())
         }
     }
 
@@ -346,14 +354,16 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun pasteLink(folder: String? = null) {
-        val clipboard = getApplication<Application>().getSystemService(ClipboardManager::class.java)
-        val text = clipboard?.primaryClip
-            ?.takeIf { it.itemCount > 0 }
-            ?.getItemAt(0)
-            ?.coerceToText(getApplication())
-            ?.toString()
-            ?.trim()
-            .orEmpty()
+        val text = runCatching {
+            val clipboard = getApplication<Application>().getSystemService(ClipboardManager::class.java)
+            clipboard?.primaryClip
+                ?.takeIf { it.itemCount > 0 }
+                ?.getItemAt(0)
+                ?.coerceToText(getApplication())
+                ?.toString()
+                ?.trim()
+                .orEmpty()
+        }.getOrDefault("")
         if (text.isEmpty()) {
             _state.update { it.copy(message = "Copy a YouTube link first.") }
             return
@@ -374,6 +384,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val next = !repository.wallpaperOn()
         repository.setWallpaper(next)
         _state.update { it.copy(wallpaper = next) }
+    }
+
+    fun setAccent(name: String) {
+        repository.setAccent(name)
+        _state.update { it.copy(accent = repository.accent()) }
     }
 
     fun makeFolder(name: String) {
@@ -477,8 +492,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         rememberFolder(commands.first())
         backStack.clear()
         val message = if (commands.size == 1) "Queued." else "${commands.size} songs queued."
+        commands.forEach { command ->
+            val video = command as Command.EnqueueVideo
+            val titled = videos.find { it.first == video.videoId }?.second
+            if (!titled.isNullOrBlank()) knownTitles[video.videoId] = titled
+            announce(command)
+        }
         _state.update { it.copy(library = shown(), message = message, screen = Screen.Home) }
-        if (commands.size == 1) announce(commands.first())
         flush()
     }
 
@@ -575,7 +595,25 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         return title
     }
 
-    private fun shown(): LibraryView = present(driveLibrary.including(localQueue.read()))
+    private fun showLibrary(view: LibraryView) {
+        runCatching {
+            val done = view.history.filter { it.status == "done" }.map { it.commandId }
+            val fresh = if (primedHistory) done.filter { it !in seenDone } else emptyList()
+            primedHistory = true
+            seenDone.addAll(done)
+            fresh.forEach { id ->
+                val entry = view.history.lastOrNull { it.commandId == id && it.status == "done" } ?: return@forEach
+                val name = entry.title.ifBlank { "Song" }
+                val text = if (entry.folder.isBlank()) name else "$name · ${entry.folder}"
+                runCatching { QueueNotifier.show(getApplication(), id.hashCode(), "Download complete", text) }
+            }
+            driveLibrary = view
+        }
+    }
+
+    private fun shown(): LibraryView = runCatching {
+        present(driveLibrary.including(localQueue.read()))
+    }.getOrDefault(driveLibrary)
 
     private fun present(library: LibraryView): LibraryView {
         val named = library.withKnownTitles(knownTitles)
@@ -593,11 +631,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }.distinct().filter { it !in knownTitles && it !in missedTitles }
         if (ids.isEmpty()) return
         viewModelScope.launch {
-            for (id in ids) {
-                val title = withContext(Dispatchers.IO) { YoutubeTitles.lookup(id) }
-                if (title.isNullOrBlank()) missedTitles += id else knownTitles[id] = title
+            try {
+                for (id in ids) {
+                    val title = withContext(Dispatchers.IO) { YoutubeTitles.lookup(id) }
+                    if (title.isNullOrBlank()) missedTitles += id else knownTitles[id] = title
+                }
+                _state.update { it.copy(library = runCatching { it.library.withKnownTitles(knownTitles) }.getOrDefault(it.library)) }
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
             }
-            _state.update { it.copy(library = it.library.withKnownTitles(knownTitles)) }
         }
     }
 
@@ -641,7 +683,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                         announce(result.command)
                         val again = withContext(Dispatchers.IO) { repository.load(token) }
                         if (again is LoadedNotebook.Ready) {
-                            driveLibrary = Queue(again.commands, again.state).view.copy(history = again.history)
+                            runCatching { showLibrary(Queue(again.commands, again.state).view.copy(history = again.history)) }
                         }
                         if (goHome) backStack.clear()
                         _state.update {

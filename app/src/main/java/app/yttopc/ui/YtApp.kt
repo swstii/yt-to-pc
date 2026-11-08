@@ -25,6 +25,7 @@ import app.yttopc.data.PlaylistDetails
 import app.yttopc.data.YoutubePreview
 import app.yttopc.data.YoutubeTitles
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
@@ -117,6 +118,9 @@ import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.ReadOnlyComposable
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -212,6 +216,7 @@ fun YtApp(model: AppViewModel) {
 
     val loadingScreen = state.loading && state.screen !is Screen.Share && state.library.folders.isEmpty()
     val showWallpaper = !state.notebookChosen || loadingScreen || state.wallpaper
+    CompositionLocalProvider(LocalAccent provides accentColor(state.accent)) {
     Box(Modifier.fillMaxSize().background(Color.Black)) {
     if (showWallpaper) {
         GifBackdrop(speed = if (state.notebookChosen && !loadingScreen) 0.5f else 1f)
@@ -356,6 +361,7 @@ fun YtApp(model: AppViewModel) {
             Screen.Status -> StatusScreen(padding, state.library)
         }
         }
+    }
     }
     }
 }
@@ -684,7 +690,7 @@ private fun HomeScreen(
                     PopIn(matchingFolders.size + index, playIntro) {
                     Card(
                         onClick = { open(Screen.Folder(hit.folder, hit.track.videoId, hit.track.commandId)) },
-                        modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp).border(2.dp, TilePink, RoundedCornerShape(16.dp)),
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp).border(2.dp, SoftPink, RoundedCornerShape(16.dp)),
                         shape = RoundedCornerShape(16.dp),
                         colors = homeTileColors(),
                     ) {
@@ -1288,14 +1294,18 @@ private fun StatusScreen(padding: PaddingValues, library: LibraryView) {
             val slide by animateDpAsState(target, tween(340), label = "statusLine")
             Row(Modifier.fillMaxSize()) {
                 StatusTab(Modifier.weight(1f), onClick = { historyOpen = false }) {
-                    WaitingSpinner(Modifier.size(53.dp))
+                    if (library.activity.isEmpty()) {
+                        Text("IDLE", color = SoftPink, fontWeight = FontWeight.Bold, fontSize = 16.sp, letterSpacing = 2.sp)
+                    } else {
+                        WaitingSpinner(Modifier.size(27.dp))
+                    }
                 }
                 StatusTab(Modifier.weight(1f), onClick = { historyOpen = true }) {
                     Image(
                         painterResource(app.yttopc.R.drawable.ic_status_history),
                         contentDescription = "History",
                         colorFilter = ColorFilter.tint(SoftPink),
-                        modifier = Modifier.size(56.dp),
+                        modifier = Modifier.size(28.dp),
                     )
                 }
             }
@@ -1329,7 +1339,7 @@ private fun StatusScreen(padding: PaddingValues, library: LibraryView) {
                 }
             }
         } else if (library.activity.isEmpty()) {
-            Text("Nothing left.", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            Text("IDLE", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         } else {
             Text(
                 "${library.activity.size} pending",
@@ -1370,6 +1380,7 @@ private fun StatusTab(
 
 @Composable
 private fun WaitingSpinner(modifier: Modifier = Modifier) {
+    val ink = SoftPink
     val spin = rememberInfiniteTransition(label = "waiting")
     val angle by spin.animateFloat(
         initialValue = 0f,
@@ -1386,7 +1397,7 @@ private fun WaitingSpinner(modifier: Modifier = Modifier) {
             val alpha = 0.18f + 0.82f * ((bars - index) / bars.toFloat())
             drawRotate(index * (360f / bars), center) {
                 drawRoundRect(
-                    color = SoftPink.copy(alpha = alpha),
+                    color = ink.copy(alpha = alpha),
                     topLeft = androidx.compose.ui.geometry.Offset(center.x - thickness / 2f, center.y - radius + thickness),
                     size = androidx.compose.ui.geometry.Size(thickness, length),
                     cornerRadius = androidx.compose.ui.geometry.CornerRadius(thickness, thickness),
@@ -1421,6 +1432,29 @@ private fun SettingsScreen(
             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFFEB3B), contentColor = Color.Black),
         ) {
             Text(if (state.wallpaper) "Use black background" else "Use default wallpaper", maxLines = 1)
+        }
+        Text("App color", style = MaterialTheme.typography.labelLarge)
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Accents.forEach { choice ->
+                val chosen = state.accent == choice.key
+                Column(
+                    Modifier.width(68.dp).clickable { model.setAccent(choice.key) },
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Box(
+                        Modifier
+                            .size(34.dp)
+                            .clip(CircleShape)
+                            .background(choice.color)
+                            .border(if (chosen) 3.dp else 1.dp, if (chosen) Color.White else Color.White.copy(alpha = 0.35f), CircleShape),
+                    )
+                    Text(choice.label, color = Color.White, fontSize = 11.sp, textAlign = TextAlign.Center, maxLines = 2)
+                }
+            }
         }
         Button(
             onClick = model::changeDriveFolder,
@@ -1718,6 +1752,7 @@ private fun FolderTile(folder: FolderView, selected: Boolean, onClick: () -> Uni
 
 @Composable
 private fun PinkDotLoader(modifier: Modifier = Modifier) {
+    val ink = SoftPink
     val travel = rememberInfiniteTransition(label = "dots")
     val head by travel.animateFloat(
         initialValue = -2f,
@@ -1743,9 +1778,9 @@ private fun PinkDotLoader(modifier: Modifier = Modifier) {
             val center = Offset(step * index + step / 2f, size.height / 2f)
             val radius = biggest * (0.28f + 0.72f * shape)
             if (glow > 0.2f) {
-                drawCircle(SoftPink.copy(alpha = 0.28f * glow), radius * 2.1f, center)
+                drawCircle(ink.copy(alpha = 0.28f * glow), radius * 2.1f, center)
             }
-            drawCircle(SoftPink.copy(alpha = 0.28f + 0.72f * glow), radius, center)
+            drawCircle(ink.copy(alpha = 0.28f + 0.72f * glow), radius, center)
         }
     }
 }
@@ -1776,6 +1811,7 @@ private fun SendMark(tint: Color, modifier: Modifier = Modifier) {
         painterResource(app.yttopc.R.drawable.ic_send_arrow),
         contentDescription = "Queue",
         contentScale = ContentScale.Fit,
+        colorFilter = ColorFilter.tint(tint.copy(alpha = 1f)),
         modifier = modifier.size(72.dp).graphicsLayer { alpha = tint.alpha },
     )
 }
@@ -1814,11 +1850,12 @@ private fun FadeLine() {
 
 @Composable
 private fun StorageMark(modifier: Modifier = Modifier) {
+    val ink = SoftPink
     Canvas(modifier) {
         val stroke = size.minDimension * 0.28f
         val inset = stroke / 2f
         drawArc(
-            color = SoftPink,
+            color = ink,
             startAngle = 28f,
             sweepAngle = 292f,
             useCenter = false,
@@ -1832,14 +1869,40 @@ private fun StorageMark(modifier: Modifier = Modifier) {
 @Composable
 private fun BackToTop(visible: Boolean, onClick: () -> Unit) {
     AnimatedVisibility(visible = visible, enter = fadeIn(tween(180)), exit = fadeOut(tween(120))) {
-        SmallFloatingActionButton(onClick = onClick, containerColor = SoftPink, contentColor = Color.Black) {
+        SmallFloatingActionButton(onClick = onClick, containerColor = SoftPink, contentColor = onAccent()) {
             Icon(Icons.Filled.KeyboardArrowUp, contentDescription = "Back to top")
         }
     }
 }
 
-private val SoftPink = Color(0xFFFF9BE3)
-private val TilePink = Color(0xFFFFC8F0)
+private data class AccentChoice(val key: String, val label: String, val color: Color)
+
+private val Accents = listOf(
+    AccentChoice("dark-red", "Dark Red", Color(0xFFE05A5A)),
+    AccentChoice("dark-green", "Dark Green", Color(0xFF3EAF74)),
+    AccentChoice("dark-blue", "Dark Blue", Color(0xFF5C7CFA)),
+    AccentChoice("pink", "Pink", Color(0xFFFF9BE3)),
+    AccentChoice("purple", "Purple", Color(0xFFC77DFF)),
+    AccentChoice("yellow", "Yellow", Color(0xFFFFE14A)),
+    AccentChoice("orange", "Orange", Color(0xFFFF9F43)),
+)
+
+private val LocalAccent = staticCompositionLocalOf { Accents.first { it.key == "pink" }.color }
+
+private fun accentColor(key: String): Color = Accents.find { it.key == key }?.color ?: Color(0xFFFF9BE3)
+
+private val SoftPink: Color
+    @Composable
+    @ReadOnlyComposable
+    get() = LocalAccent.current
+
+@Composable
+@ReadOnlyComposable
+private fun onAccent(): Color {
+    val color = SoftPink
+    val light = color.red * 0.299f + color.green * 0.587f + color.blue * 0.114f
+    return if (light > 0.62f) Color.Black else Color.White
+}
 
 @Composable
 private fun homeTileColors() = CardDefaults.cardColors(
@@ -1863,7 +1926,7 @@ private fun NewFolderButton(enabled: Boolean, onClick: () -> Unit, modifier: Mod
             .clickable(enabled = enabled, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        Icon(Icons.Filled.Add, contentDescription = "New folder", tint = Color.Black, modifier = Modifier.size(42.dp))
+        Icon(Icons.Filled.Add, contentDescription = "New folder", tint = onAccent(), modifier = Modifier.size(42.dp))
     }
 }
 
