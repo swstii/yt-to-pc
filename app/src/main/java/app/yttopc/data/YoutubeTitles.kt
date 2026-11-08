@@ -54,10 +54,12 @@ object YoutubeTitles {
     }
 
     private fun readPlaylist(id: String): PlaylistDetails? {
+        val browsed = browsePlaylist(id)
+        if (browsed != null && browsed.videos.size > 1) return browsed
         val feed = readText("https://www.youtube.com/feeds/videos.xml?playlist_id=" + URLEncoder.encode(id, Charsets.UTF_8.name()), browser = true)
         val parsed = feed?.let { runCatching { parseFeed(it) }.getOrNull() }
-        if (parsed != null && (parsed.title.isNotBlank() || parsed.videos.isNotEmpty())) return parsed
-        return playlistPage(id)
+        if (parsed != null && parsed.videos.isNotEmpty()) return parsed
+        return browsed
     }
 
     private fun parseFeed(xml: String): PlaylistDetails? {
@@ -100,24 +102,95 @@ object YoutubeTitles {
         return PlaylistDetails(playlistTitle.ifBlank { "Playlist" }, videos)
     }
 
-    private fun playlistPage(id: String): PlaylistDetails? {
-        val html = readText("https://www.youtube.com/playlist?list=$id", browser = true) ?: return null
-        val title = Regex("""property="og:title"\s+content="([^"]+)"""")
-            .find(html)?.groupValues?.get(1)?.let(::unescape)?.trim().orEmpty()
-        val image = Regex("""property="og:image"\s+content="([^"]+)"""")
-            .find(html)?.groupValues?.get(1)?.let(::unescape)
-        if (title.isBlank() && image.isNullOrBlank()) return null
-        val thumbVideo = image?.let { Regex("""/vi/([A-Za-z0-9_-]{11})/""").find(it)?.groupValues?.get(1) }
-        val videos = if (thumbVideo == null) emptyList() else listOf(PlaylistVideo(thumbVideo, title.ifBlank { thumbVideo }, image))
-        return PlaylistDetails(title.ifBlank { "Playlist" }, videos)
+    private fun browsePlaylist(id: String): PlaylistDetails? {
+        val first = postBrowse(
+            """{"context":{"client":{"clientName":"WEB","clientVersion":"2.20241126.01.00","hl":"en"}},"browseId":"VL$id","params":"wgYCCAA="}""",
+        ) ?: return null
+        val title = Regex(""""playlistMetadataRenderer":\{"title":"((?:\\.|[^"\\])*)"""")
+            .find(first)?.groupValues?.get(1)?.let(::jsonText)?.trim().orEmpty()
+        val videos = linkedMapOf<String, PlaylistVideo>()
+        fun add(text: String) {
+            for (video in lockups(text)) videos.putIfAbsent(video.videoId, video)
+        }
+        add(first)
+        var token = continuation(first)
+        var pages = 0
+        while (!token.isNullOrBlank() && pages < 40) {
+            pages += 1
+            val more = postBrowse(
+                """{"context":{"client":{"clientName":"WEB","clientVersion":"2.20241126.01.00","hl":"en"}},"continuation":${JSONObject.quote(token)}}""",
+            ) ?: break
+            val before = videos.size
+            add(more)
+            if (videos.size == before) break
+            val next = continuation(more)
+            if (next == null || next == token) break
+            token = next
+        }
+        if (title.isBlank() && videos.isEmpty()) return null
+        return PlaylistDetails(title.ifBlank { "Playlist" }, videos.values.toList())
     }
 
-    private fun unescape(value: String) = value
-        .replace("&amp;", "&")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
+    private fun lockups(text: String): List<PlaylistVideo> {
+        val videos = mutableListOf<PlaylistVideo>()
+        val parts = text.split(""""lockupViewModel":{"contentImage"""")
+        for (part in parts.drop(1)) {
+            val id = Regex("""/vi/([A-Za-z0-9_-]{11})/""").find(part)?.groupValues?.get(1) ?: continue
+            val raw = Regex(""""lockupMetadataViewModel":\{"title":\{"content":"((?:\\.|[^"\\])*)"""")
+                .find(part)?.groupValues?.get(1)
+            val title = raw?.let(::jsonText)?.trim().orEmpty().ifBlank { id }
+            val thumb = "https://i.ytimg.com/vi/$id/hqdefault.jpg"
+            videos += PlaylistVideo(id, title, thumb)
+        }
+        return videos
+    }
+
+    private fun continuation(text: String): String? =
+        Regex(""""continuationCommand":\{"token":"([^"]+)"""").findAll(text)
+            .map { it.groupValues[1] }
+            .maxByOrNull { it.length }
+
+    private fun postBrowse(body: String): String? {
+        val connection = open("https://www.youtube.com/youtubei/v1/browse?prettyPrint=false", browser = true)
+        connection.requestMethod = "POST"
+        connection.doOutput = true
+        connection.setRequestProperty("Content-Type", "application/json")
+        return try {
+            connection.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+            if (connection.responseCode != HttpURLConnection.HTTP_OK) null
+            else connection.inputStream.bufferedReader().readText()
+        } catch (_: Exception) {
+            null
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun jsonText(value: String): String {
+        val out = StringBuilder()
+        var index = 0
+        while (index < value.length) {
+            val char = value[index]
+            if (char == '\\' && index + 1 < value.length) {
+                when (value[index + 1]) {
+                    'u' -> if (index + 5 < value.length) {
+                        out.append(value.substring(index + 2, index + 6).toIntOrNull(16)?.toChar() ?: '?')
+                        index += 6
+                        continue
+                    }
+                    '"' -> out.append('"')
+                    '\\' -> out.append('\\')
+                    'n' -> out.append('\n')
+                    else -> out.append(value[index + 1])
+                }
+                index += 2
+            } else {
+                out.append(char)
+                index += 1
+            }
+        }
+        return out.toString()
+    }
 
     private fun readText(address: String, browser: Boolean = false): String? {
         val connection = open(address, browser)
@@ -144,8 +217,8 @@ object YoutubeTitles {
     }
 
     private fun open(address: String, browser: Boolean = false) = (URL(address).openConnection() as HttpURLConnection).apply {
-        connectTimeout = 8000
-        readTimeout = 8000
+        connectTimeout = 12_000
+        readTimeout = 20_000
         instanceFollowRedirects = true
         setRequestProperty(
             "User-Agent",

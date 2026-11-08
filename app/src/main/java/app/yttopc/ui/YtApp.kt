@@ -1930,6 +1930,11 @@ private fun SavePaths(
 ) {
     val root = library.pendingLibraryRoot ?: library.libraryRoot
     val many = playlistKey != null
+    Text(
+        if (checked.size == 1) "1 selected" else "${checked.size} selected",
+        color = SoftPink,
+        fontWeight = FontWeight.Bold,
+    )
     Text(if (many) "Saved paths:" else "Saved path:", color = Color.White, fontWeight = FontWeight.Bold)
     if (root.isNullOrBlank()) {
         Text("The laptop has not reported a music folder yet.", color = Color.White, style = MaterialTheme.typography.bodySmall)
@@ -1941,13 +1946,19 @@ private fun SavePaths(
         } else if (playlist.videos.isEmpty()) {
             Text(savePath(root, folder), color = Color.White, style = MaterialTheme.typography.bodyMedium)
         } else {
-            playlist.videos.forEach { video ->
+            val pageSize = 50
+            val pages = (playlist.videos.size + pageSize - 1) / pageSize
+            var page by remember(playlist.videos) { mutableStateOf(0) }
+            val safe = page.coerceIn(0, pages - 1)
+            if (pages > 1) PlaylistPages(safe, pages) { page = it }
+            playlist.videos.drop(safe * pageSize).take(pageSize).forEach { video ->
                 QueuePick(
                     video.title,
                     savePath(root, folder, saveFileName(video.title)),
                     video.videoId in checked,
                 ) { onToggle(video.videoId) }
             }
+            if (pages > 1) PlaylistPages(safe, pages) { page = it }
         }
     } else if (songId != null) {
         val file = songTitle?.takeIf { it.isNotBlank() }?.let(::saveFileName)
@@ -1956,6 +1967,27 @@ private fun SavePaths(
             savePath(root, folder, file),
             songId in checked,
         ) { onToggle(songId) }
+    }
+}
+
+@Composable
+private fun PlaylistPages(page: Int, pages: Int, onPick: (Int) -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        TextButton(onClick = { onPick((page - 1).coerceAtLeast(0)) }, enabled = page > 0) { Text("Prev") }
+        for (index in 0 until pages) {
+            TextButton(onClick = { onPick(index) }) {
+                Text(
+                    "${index + 1}",
+                    color = if (index == page) SoftPink else Color.White,
+                    fontWeight = if (index == page) FontWeight.Bold else FontWeight.Normal,
+                )
+            }
+        }
+        TextButton(onClick = { onPick((page + 1).coerceAtMost(pages - 1)) }, enabled = page < pages - 1) { Text("Next") }
     }
 }
 
