@@ -70,6 +70,15 @@ sealed class LibraryBook
     public void WriteStorage(string? name, string text) =>
         WriteNested(LibraryNames.Folder(name), "storage.json", text);
 
+    public void AppendHistory(string line)
+    {
+        var existing = ReadText("history.jsonl") ?? "";
+        var lines = existing.Split('\n').Select(item => item.Trim()).Where(item => item.Length > 0).ToList();
+        lines.Add(line);
+        if (lines.Count > 200) lines = lines.Skip(lines.Count - 200).ToList();
+        WriteText("history.jsonl", string.Join('\n', lines) + "\n");
+    }
+
     private string? ReadNested(string libraryFolder, string name)
     {
         if (!string.IsNullOrWhiteSpace(_settings.DriveFolderId))

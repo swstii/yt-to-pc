@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Matrix
 import android.graphics.SurfaceTexture
 import android.media.MediaPlayer
+import android.media.PlaybackParams
 import android.view.Surface
 import android.view.TextureView
 import androidx.compose.foundation.layout.fillMaxSize
@@ -20,17 +21,18 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 private const val BACKGROUND = "background.mp4"
 
 @Composable
-fun GifBackdrop(modifier: Modifier = Modifier) {
-    LoopVideo(BACKGROUND, modifier.fillMaxSize(), cover = true)
+fun GifBackdrop(modifier: Modifier = Modifier, speed: Float = 1f) {
+    LoopVideo(BACKGROUND, modifier.fillMaxSize(), cover = true, speed = speed)
 }
 
 @Composable
-fun LoopVideo(asset: String, modifier: Modifier = Modifier, cover: Boolean = false) {
+fun LoopVideo(asset: String, modifier: Modifier = Modifier, cover: Boolean = false, speed: Float = 1f) {
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val viewRef = remember { mutableStateOf<LoopVideoView?>(null) }
     AndroidView(
         modifier = modifier,
-        factory = { LoopVideoView(it, asset, cover).also { view -> viewRef.value = view } },
+        factory = { LoopVideoView(it, asset, cover, speed).also { view -> viewRef.value = view } },
+        update = { it.setSpeed(speed) },
     )
     DisposableEffect(lifecycle) {
         val observer = LifecycleEventObserver { _, event ->
@@ -49,12 +51,14 @@ private class LoopVideoView(
     context: Context,
     private val asset: String,
     private val cover: Boolean,
+    speed: Float,
 ) : TextureView(context), TextureView.SurfaceTextureListener {
     private var player: MediaPlayer? = null
     private var output: Surface? = null
     private var videoW = 0
     private var videoH = 0
     private var playWhenReady = true
+    private var speed = speed
 
     init {
         surfaceTextureListener = this
@@ -69,6 +73,11 @@ private class LoopVideoView(
     fun resumePlayback() {
         playWhenReady = true
         player?.let { runCatching { if (!it.isPlaying) it.start() } }
+    }
+
+    fun setSpeed(value: Float) {
+        speed = value
+        player?.let { applySpeed(it) }
     }
 
     override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
@@ -111,12 +120,17 @@ private class LoopVideoView(
                 videoW = it.videoWidth
                 videoH = it.videoHeight
                 applyFit()
+                applySpeed(it)
                 if (playWhenReady) it.start()
             }
             next.prepareAsync()
         } catch (_: Exception) {
             releasePlayer()
         }
+    }
+
+    private fun applySpeed(player: MediaPlayer) {
+        runCatching { player.playbackParams = PlaybackParams().setSpeed(speed) }
     }
 
     private fun applyFit() {

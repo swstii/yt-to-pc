@@ -10,14 +10,18 @@ import androidx.activity.compose.BackHandler
 import androidx.core.content.ContextCompat
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.drawscope.rotate as drawRotate
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.platform.LocalUriHandler
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import app.yttopc.data.DriveAuth
 import app.yttopc.data.DriveFolder
+import app.yttopc.data.PlaylistDetails
 import app.yttopc.data.YoutubePreview
 import app.yttopc.data.YoutubeTitles
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -27,22 +31,27 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
@@ -50,6 +59,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -60,14 +70,16 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.CreateNewFolder
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.SmallFloatingActionButton
@@ -84,17 +96,24 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.expandHorizontally
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.runtime.Composable
@@ -105,13 +124,20 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.asImageBitmap
@@ -126,6 +152,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.yttopc.AppViewModel
@@ -149,6 +176,7 @@ fun YtApp(model: AppViewModel) {
     var shareSearchOpen by remember { mutableStateOf(false) }
     var queueReady by remember { mutableStateOf(false) }
     val deletePicked = remember { SongDelete() }
+    val openFolderSearch = remember { SongDelete() }
     val closeFolderSearch = remember { SongDelete() }
     val closeShareSearch = remember { SongDelete() }
     val queueNow = remember { SongDelete() }
@@ -182,9 +210,13 @@ fun YtApp(model: AppViewModel) {
         }
     }
 
-    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-    GifBackdrop()
-    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background.copy(alpha = 0.46f)))
+    val loadingScreen = state.loading && state.screen !is Screen.Share && state.library.folders.isEmpty()
+    val showWallpaper = !state.notebookChosen || loadingScreen || state.wallpaper
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
+    if (showWallpaper) {
+        GifBackdrop(speed = if (state.notebookChosen && !loadingScreen) 0.5f else 1f)
+        Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background.copy(alpha = 0.46f)))
+    }
     Scaffold(
         containerColor = Color.Transparent,
         contentColor = MaterialTheme.colorScheme.onBackground,
@@ -223,29 +255,18 @@ fun YtApp(model: AppViewModel) {
                             }
                         },
                         actions = {
-                            if (state.screen is Screen.Share) {
-                                Button(
-                                    onClick = queueNow.run,
-                                    enabled = queueReady,
-                                    modifier = Modifier.padding(end = 8.dp).height(32.dp),
-                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
-                                    colors = ButtonDefaults.buttonColors(
-                                        containerColor = SoftPink,
-                                        contentColor = Color.Black,
-                                        disabledContainerColor = Color.White.copy(alpha = 0.22f),
-                                        disabledContentColor = Color.White.copy(alpha = 0.55f),
-                                    ),
-                                ) {
-                                    Text("Queue →", fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                                }
-                            }
                             if (state.screen is Screen.Folder && pickedSongs.isNotEmpty()) {
-                                IconButton(onClick = deletePicked.run) {
+                                IconButton(onClick = { deletePicked.run() }) {
                                     Icon(
                                         Icons.Filled.Delete,
                                         contentDescription = "Delete selected songs",
                                         tint = Color.White,
                                     )
+                                }
+                            }
+                            if (state.screen is Screen.Folder && !folderSearchOpen) {
+                                IconButton(onClick = { openFolderSearch.run() }) {
+                                    Icon(Icons.Filled.Search, contentDescription = "Search", tint = Color.White)
                                 }
                             }
                         },
@@ -258,7 +279,7 @@ fun YtApp(model: AppViewModel) {
             OfflineScreen(padding, model::refresh)
             return@Scaffold
         }
-        if (state.loading) {
+        if (state.loading && state.screen !is Screen.Share && state.library.folders.isEmpty()) {
             Box(Modifier.fillMaxSize().padding(padding)) {
                 Column(
                     Modifier.align(Alignment.Center).fillMaxWidth(0.72f),
@@ -281,7 +302,24 @@ fun YtApp(model: AppViewModel) {
             SetupScreen(padding, state, model) { request -> signIn.launch(request) }
             return@Scaffold
         }
-        when (val screen = state.screen) {
+        AnimatedContent(
+            targetState = state.screen,
+            transitionSpec = {
+                val openingFolder = targetState is Screen.Folder && initialState !is Screen.Folder
+                val closingFolder = initialState is Screen.Folder && targetState !is Screen.Folder
+                if (openingFolder) {
+                    (slideInHorizontally(tween(320)) { it } + fadeIn(tween(220))) togetherWith
+                        (slideOutHorizontally(tween(320)) { -it } + fadeOut(tween(180)))
+                } else if (closingFolder) {
+                    (slideInHorizontally(tween(320)) { -it } + fadeIn(tween(220))) togetherWith
+                        (slideOutHorizontally(tween(320)) { it } + fadeOut(tween(180)))
+                } else {
+                    fadeIn(tween(180)) togetherWith fadeOut(tween(120))
+                }
+            },
+            label = "folderSwipe",
+        ) { screen ->
+        when (screen) {
             Screen.Home -> HomeScreen(padding, state, model::open, model::makeFolder, model::pasteLink)
             is Screen.Folder -> FolderScreen(
                 padding,
@@ -295,16 +333,16 @@ fun YtApp(model: AppViewModel) {
                     if (pickedSongs != ids) pickedSongs = ids
                     deletePicked.run = delete
                 },
-                onSearch = { open, close ->
+                onSearch = { open, close, openIt ->
                     if (folderSearchOpen != open) folderSearchOpen = open
                     closeFolderSearch.run = close
+                    openFolderSearch.run = openIt
                 },
             )
             is Screen.Share -> ShareScreen(
                 padding,
                 state.library,
                 screen.text,
-                screen.folder,
                 state.busy,
                 model,
                 onBar = { ready, queue, searching, close ->
@@ -316,6 +354,7 @@ fun YtApp(model: AppViewModel) {
             )
             Screen.Settings -> SettingsScreen(padding, state, model)
             Screen.Status -> StatusScreen(padding, state.library)
+        }
         }
     }
     }
@@ -416,6 +455,7 @@ private fun HomeTopBar(
     searchOpen: Boolean,
     query: String,
     onQuery: (String) -> Unit,
+    onSearch: () -> Unit,
     searchFocus: FocusRequester,
     selecting: Boolean,
     storagePulse: Float,
@@ -437,30 +477,37 @@ private fun HomeTopBar(
             exit = fadeOut(tween(120)),
         ) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                StorageMark(Modifier.padding(start = 12.dp).size(22.dp))
                 Text(
                     storageLabel(storage, selected),
                     modifier = Modifier
-                        .padding(start = 12.dp, end = 8.dp)
+                        .padding(start = 6.dp, end = 8.dp)
                         .background(
                             if (selecting) SoftPink.copy(alpha = 0.28f * storagePulse) else Color.Transparent,
                             RoundedCornerShape(8.dp),
                         )
-                        .padding(horizontal = 8.dp, vertical = 4.dp),
-                    color = if (selecting) SoftPink.copy(alpha = 0.55f + 0.45f * storagePulse) else Color.White,
+                        .padding(horizontal = 4.dp, vertical = 4.dp),
+                    color = if (selecting) SoftPink.copy(alpha = 0.55f + 0.45f * storagePulse) else SoftPink,
                     fontWeight = FontWeight.Bold,
                     maxLines = 1,
                 )
                 Spacer(Modifier.weight(1f))
+                IconButton(onClick = onSearch) {
+                    Icon(Icons.Filled.Search, contentDescription = "Search", tint = Color.White)
+                }
                 Box(
-                    Modifier.size(42.dp).clickable { open(Screen.Status) },
+                    Modifier.size(48.dp).clickable { open(Screen.Status) },
+                    contentAlignment = Alignment.Center,
                 ) {
                     Icon(
                         Icons.Filled.Download,
                         contentDescription = "Status",
-                        tint = if (downloading) SoftPink.copy(alpha = 0.55f + 0.45f * storagePulse) else Color.White,
+                        tint = when {
+                            downloading -> SoftPink.copy(alpha = 0.55f + 0.45f * storagePulse)
+                            pending > 0 -> SoftPink
+                            else -> Color.White
+                        },
                         modifier = Modifier
-                            .align(Alignment.BottomEnd)
-                            .padding(end = 2.dp, bottom = 2.dp)
                             .size(24.dp)
                             .then(
                                 if (downloading) {
@@ -473,7 +520,7 @@ private fun HomeTopBar(
                     if (pending > 0) {
                         Text(
                             pending.toString(),
-                            modifier = Modifier.align(Alignment.TopStart).padding(start = 1.dp, top = 1.dp),
+                            modifier = Modifier.align(Alignment.TopStart).padding(start = 6.dp, top = 4.dp),
                             color = Color.White,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
@@ -551,12 +598,18 @@ private fun HomeScreen(
         playIntro = false
     }
     val matchingSongs = if (needle.isEmpty()) emptyList() else songsMatching(library, needle)
+    val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
+    val showTop by remember {
+        derivedStateOf { listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > 24 }
+    }
     Box(Modifier.fillMaxSize().navigationBarsPadding()) {
         Column(Modifier.fillMaxSize()) {
             HomeTopBar(
                 searchOpen,
                 query,
                 { query = it },
+                { searchOpen = true },
                 searchFocus,
                 selecting,
                 storagePulse,
@@ -591,7 +644,7 @@ private fun HomeScreen(
             }
             if (library.folders.isEmpty()) {
                 Text(
-                    "No folders yet. Use the folder button, then the add button for a YouTube link.",
+                    "No folders yet. Use the plus button, then the link button for a YouTube link.",
                     Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
                     color = MaterialTheme.colorScheme.onBackground,
                 )
@@ -603,10 +656,14 @@ private fun HomeScreen(
                 )
             }
             LazyColumn(
+                state = listState,
                 contentPadding = PaddingValues(start = 16.dp, top = 0.dp, end = 16.dp, bottom = 96.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(0.dp),
                 modifier = Modifier.weight(1f),
             ) {
+                if (matchingFolders.isNotEmpty()) {
+                    item { FadeLine() }
+                }
                 itemsIndexed(matchingFolders, key = { _, folder -> "folder-${folder.name}" }) { index, folder ->
                     val picked = selected.any { it.equals(folder.name, ignoreCase = true) }
                     PopIn(index, playIntro) {
@@ -619,7 +676,7 @@ private fun HomeScreen(
                                 },
                                 onLongClick = { selected = toggleFolder(selected, folder.name) },
                             )
-                            if (index < matchingFolders.lastIndex) FadeLine()
+                            FadeLine()
                         }
                     }
                 }
@@ -627,7 +684,7 @@ private fun HomeScreen(
                     PopIn(matchingFolders.size + index, playIntro) {
                     Card(
                         onClick = { open(Screen.Folder(hit.folder, hit.track.videoId, hit.track.commandId)) },
-                        modifier = Modifier.fillMaxWidth().border(2.dp, TilePink, RoundedCornerShape(16.dp)),
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp).border(2.dp, TilePink, RoundedCornerShape(16.dp)),
                         shape = RoundedCornerShape(16.dp),
                         colors = homeTileColors(),
                     ) {
@@ -640,34 +697,22 @@ private fun HomeScreen(
                 }
             }
         }
-        if (!searchOpen) {
-            FloatingActionButton(
-                onClick = { searchOpen = true },
-                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 16.dp),
-                containerColor = SoftPink,
-                contentColor = Color.Black,
-            ) {
-                Icon(Icons.Filled.Search, contentDescription = "Search")
-            }
-        }
+        NewFolderButton(
+            enabled = !busy,
+            onClick = { creating = true },
+            modifier = Modifier.align(Alignment.BottomStart).padding(16.dp),
+        )
         Column(
             Modifier.align(Alignment.BottomEnd).padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
             horizontalAlignment = Alignment.End,
         ) {
-            SmallFloatingActionButton(
-                onClick = { if (!busy) creating = true },
-                containerColor = SoftPink,
-                contentColor = Color.Black,
+            BackToTop(showTop) { scope.launch { listState.animateScrollToItem(0) } }
+            Box(
+                Modifier.size(68.dp).clickable(enabled = !busy) { pasteLink() },
+                contentAlignment = Alignment.Center,
             ) {
-                Icon(Icons.Filled.CreateNewFolder, contentDescription = "New folder")
-            }
-            FloatingActionButton(
-                onClick = { if (!busy) pasteLink() },
-                containerColor = SoftPink,
-                contentColor = Color.Black,
-            ) {
-                Icon(Icons.Filled.Add, contentDescription = "Paste YouTube link")
+                LinkMark(SoftPink, Modifier.size(64.dp))
             }
         }
     }
@@ -694,7 +739,7 @@ private fun FolderScreen(
     busy: Boolean,
     model: AppViewModel,
     onPicked: (Set<String>, () -> Unit) -> Unit,
-    onSearch: (Boolean, () -> Unit) -> Unit,
+    onSearch: (Boolean, () -> Unit, () -> Unit) -> Unit,
 ) {
     val folder = library.folders.find { it.name.equals(name, ignoreCase = true) }
     var selected by remember(name) { mutableStateOf(emptySet<String>()) }
@@ -705,14 +750,15 @@ private fun FolderScreen(
     val focus = LocalFocusManager.current
     val searchFocus = remember { FocusRequester() }
     val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
     val scrolled by remember {
         derivedStateOf {
             listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > 24
         }
     }
-    val collapse by animateFloatAsState(
-        targetValue = if (scrolled) 1f else 0f,
-        animationSpec = tween(340),
+    val shrink by animateFloatAsState(
+        targetValue = if (searchOpen || scrolled) 1f else 0f,
+        animationSpec = tween(160),
         label = "folderTitle",
     )
     val askDelete = { confirmSongs = true }
@@ -721,14 +767,15 @@ private fun FolderScreen(
         searchOpen = false
         focus.clearFocus()
     }
+    val openSearch = { searchOpen = true }
     SideEffect {
         onPicked(selected, askDelete)
-        onSearch(searchOpen, closeSearch)
+        onSearch(searchOpen, closeSearch, openSearch)
     }
     DisposableEffect(Unit) {
         onDispose {
             onPicked(emptySet(), {})
-            onSearch(false, {})
+            onSearch(false, {}, {})
         }
     }
     LaunchedEffect(searchOpen) {
@@ -767,22 +814,26 @@ private fun FolderScreen(
         if (approach != target) listState.animateScrollToItem(target)
     }
     Column(Modifier.fillMaxSize().padding(padding)) {
-    FolderHeader(folder.name, collapse, searchOpen, query, { query = it }, searchFocus, selected.size)
+    FolderHeader(folder.name, shrink, searchOpen, query, { query = it }, searchFocus, selected.size)
+    Spacer(Modifier.height(12.dp * shrink))
     Box(Modifier.weight(1f)) {
     LazyColumn(
         Modifier.fillMaxSize(),
         state = listState,
         contentPadding = PaddingValues(start = 16.dp, top = 8.dp, end = 16.dp, bottom = 88.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(0.dp),
     ) {
         if (needle.isNotEmpty() && visibleAlbums.isEmpty() && visibleTracks.isEmpty()) {
             item { Text("No song matches that search.", color = MaterialTheme.colorScheme.onBackground) }
+        }
+        if (visibleAlbums.isNotEmpty() || visibleTracks.isNotEmpty()) {
+            item { FadeLine() }
         }
         itemsIndexed(visibleAlbums, key = { _, album -> "album-${album.commandId}" }) { index, album ->
             PopIn(index, playIntro) {
                 Column {
                     AlbumRow(album, busy, onRetry = { model.retry(album.commandId) })
-                    if (index < visibleAlbums.lastIndex || visibleTracks.isNotEmpty()) FadeLine()
+                    FadeLine()
                 }
             }
         }
@@ -808,7 +859,7 @@ private fun FolderScreen(
                         },
                         onRetry = { track.commandId?.let(model::retry) },
                     )
-                    if (index < visibleTracks.lastIndex) FadeLine()
+                    FadeLine()
                 }
             }
         }
@@ -826,23 +877,18 @@ private fun FolderScreen(
             }
         }
     }
-        if (!searchOpen) {
-            FloatingActionButton(
-                onClick = { searchOpen = true },
-                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 16.dp),
-                containerColor = SoftPink,
-                contentColor = Color.Black,
-            ) {
-                Icon(Icons.Filled.Search, contentDescription = "Search")
-            }
-        }
-        FloatingActionButton(
-            onClick = { if (!busy) model.pasteLink(folder.name) },
-            modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
-            containerColor = SoftPink,
-            contentColor = Color.Black,
+        Column(
+            Modifier.align(Alignment.BottomEnd).padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+            horizontalAlignment = Alignment.End,
         ) {
-            Icon(Icons.Filled.Add, contentDescription = "Paste a link into this folder")
+            BackToTop(scrolled) { scope.launch { listState.animateScrollToItem(0) } }
+            Box(
+                Modifier.size(68.dp).clickable(enabled = !busy) { model.pasteLink(folder.name) },
+                contentAlignment = Alignment.Center,
+            ) {
+                LinkMark(SoftPink, Modifier.size(64.dp))
+            }
         }
     }
     }
@@ -885,54 +931,40 @@ private fun FolderScreen(
 @Composable
 private fun FolderHeader(
     name: String,
-    collapse: Float,
+    shrink: Float,
     searchOpen: Boolean,
     query: String,
     onQuery: (String) -> Unit,
     searchFocus: FocusRequester,
     selectedCount: Int,
 ) {
-    val density = LocalDensity.current
-    Box(Modifier.fillMaxWidth()) {
-        AnimatedVisibility(
-            visible = !searchOpen,
-            enter = fadeIn(tween(180)),
-            exit = fadeOut(tween(120)),
-        ) {
-            val font = 66f + (30f - 66f) * collapse
-            val line = 70f + (34f - 70f) * collapse
-            Column(Modifier.fillMaxWidth()) {
-                Text(
-                    name,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .graphicsLayer { translationY = with(density) { (-10).dp.toPx() } * collapse }
-                        .padding(horizontal = 16.dp),
-                    color = SoftPink,
-                    fontSize = font.sp,
-                    fontWeight = FontWeight.Bold,
-                    textAlign = TextAlign.Center,
-                    lineHeight = line.sp,
-                    maxLines = if (collapse > 0.55f) 1 else 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                if (selectedCount > 0) {
-                    Text(
-                        "$selectedCount selected",
-                        Modifier.fillMaxWidth().padding(top = 6.dp, end = 16.dp),
-                        color = Color.White,
-                        style = MaterialTheme.typography.bodyMedium,
-                        textAlign = TextAlign.End,
-                    )
-                }
-                Spacer(Modifier.height((8f * (1f - collapse) + 40f * (1f - collapse)).dp))
-            }
+    val font = 66f + (30f - 66f) * shrink
+    val line = 70f + (34f - 70f) * shrink
+    Column(Modifier.fillMaxWidth()) {
+        Text(
+            name,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+            color = SoftPink,
+            fontSize = font.sp,
+            fontWeight = FontWeight.Bold,
+            textAlign = TextAlign.Center,
+            lineHeight = line.sp,
+            maxLines = if (shrink > 0.55f) 1 else 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+        if (selectedCount > 0) {
+            Text(
+                "$selectedCount selected",
+                Modifier.fillMaxWidth().padding(top = 6.dp, end = 16.dp),
+                color = Color.White,
+                style = MaterialTheme.typography.bodyMedium,
+                textAlign = TextAlign.End,
+            )
         }
         AnimatedVisibility(
             visible = searchOpen,
-            modifier = Modifier.fillMaxWidth().background(Color.Black),
-            enter = expandHorizontally(tween(320), Alignment.CenterHorizontally) + fadeIn(tween(220)),
-            exit = shrinkHorizontally(tween(220), Alignment.CenterHorizontally) + fadeOut(tween(140)),
+            enter = expandVertically(tween(280), Alignment.Top) + fadeIn(tween(220)),
+            exit = shrinkVertically(tween(200), Alignment.Top) + fadeOut(tween(140)),
         ) {
             OutlinedTextField(
                 value = query,
@@ -966,12 +998,15 @@ private fun TrackRow(
         shape = RoundedCornerShape(16.dp),
         colors = homeTileColors(),
     ) {
-        Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Row(Modifier.padding(start = 4.dp, end = 8.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            TileMark()
+            Column(Modifier.weight(1f).padding(start = 12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     track.title,
                     Modifier.weight(1f),
                     style = MaterialTheme.typography.titleMedium,
+                    minLines = 2,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -982,6 +1017,7 @@ private fun TrackRow(
             if (track.status == ItemStatus.FAILED && track.commandId != null && !track.deletePending) {
                 TextButton(onClick = onRetry, enabled = !busy) { Text("Retry") }
             }
+            }
         }
     }
 }
@@ -989,7 +1025,9 @@ private fun TrackRow(
 @Composable
 private fun AlbumRow(album: AlbumView, busy: Boolean, onRetry: () -> Unit) {
     Card(Modifier.fillMaxWidth(), colors = panelColors()) {
-        Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(Modifier.padding(start = 4.dp, end = 8.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            TileMark()
+            Column(Modifier.weight(1f).padding(start = 12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     album.title.ifBlank { "Playlist" },
@@ -1005,32 +1043,8 @@ private fun AlbumRow(album: AlbumView, busy: Boolean, onRetry: () -> Unit) {
             if (album.status == ItemStatus.FAILED) {
                 TextButton(onClick = onRetry, enabled = !busy) { Text("Retry") }
             }
+            }
         }
-    }
-}
-
-@Composable
-private fun QueueSearchBar(
-    searchOpen: Boolean,
-    query: String,
-    onQuery: (String) -> Unit,
-    searchFocus: FocusRequester,
-) {
-    AnimatedVisibility(
-        visible = searchOpen,
-        modifier = Modifier.fillMaxWidth(),
-        enter = expandHorizontally(tween(320), Alignment.CenterHorizontally) + fadeIn(tween(220)),
-        exit = shrinkHorizontally(tween(220), Alignment.CenterHorizontally) + fadeOut(tween(140)),
-    ) {
-        OutlinedTextField(
-            value = query,
-            onValueChange = onQuery,
-            modifier = Modifier.fillMaxWidth().focusRequester(searchFocus),
-            singleLine = true,
-            label = { Text("Search folders") },
-            leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
-            colors = searchFieldColors(),
-        )
     }
 }
 
@@ -1039,7 +1053,6 @@ private fun ShareScreen(
     padding: PaddingValues,
     library: LibraryView,
     text: String,
-    preferredFolder: String?,
     busy: Boolean,
     model: AppViewModel,
     onBar: (Boolean, () -> Unit, Boolean, () -> Unit) -> Unit,
@@ -1047,20 +1060,22 @@ private fun ShareScreen(
     val parsed = YoutubeLinks.parse(text)
     val target = (parsed as? ParseResult.Found)?.target
     var choice by rememberSaveable(text) { mutableStateOf(if (target is YoutubeTarget.Playlist) ShareChoice.PLAYLIST else ShareChoice.SONG) }
-    var selected by rememberSaveable(text, preferredFolder) {
-        mutableStateOf(
-            preferredFolder?.takeIf { name -> library.folders.any { it.name == name && !it.removePending } },
-        )
-    }
+    var selected by rememberSaveable(text) { mutableStateOf<String?>(null) }
     var creating by rememberSaveable { mutableStateOf(false) }
     var query by rememberSaveable(text) { mutableStateOf("") }
-    var searchOpen by rememberSaveable(text) { mutableStateOf(false) }
+    var typing by rememberSaveable(text) { mutableStateOf(false) }
+    var menuOpen by rememberSaveable(text) { mutableStateOf(false) }
     val focus = LocalFocusManager.current
-    val searchFocus = remember { FocusRequester() }
-    var playIntro by remember { mutableStateOf(true) }
+    val fieldSource = remember { MutableInteractionSource() }
+    val fieldFocused by fieldSource.collectIsFocusedAsState()
+    val searching = menuOpen || typing || query.isNotBlank()
+    LaunchedEffect(fieldFocused) {
+        if (fieldFocused) menuOpen = true
+    }
     val closeSearch = {
         query = ""
-        searchOpen = false
+        typing = false
+        menuOpen = false
         focus.clearFocus()
     }
     val queue: () -> Unit = {
@@ -1068,23 +1083,57 @@ private fun ShareScreen(
         Unit
     }
     SideEffect {
-        onBar(selected != null && target != null && !busy, queue, searchOpen, closeSearch)
+        onBar(selected != null && target != null, queue, searching, closeSearch)
     }
     DisposableEffect(Unit) {
         onDispose { onBar(false, {}, false, {}) }
     }
-    LaunchedEffect(searchOpen) {
-        if (searchOpen) {
-            delay(50)
-            runCatching { searchFocus.requestFocus() }
+    BackHandler(enabled = searching) { closeSearch() }
+    BackHandler(enabled = creating) { creating = false }
+    val previewKey = target?.let { previewId(it, choice) }
+    val playlistKey = when {
+        target is YoutubeTarget.Playlist -> target.playlistId
+        target is YoutubeTarget.VideoAndPlaylist && choice == ShareChoice.PLAYLIST -> target.playlistId
+        else -> null
+    }
+    var card by remember(previewKey) { mutableStateOf<YoutubePreview?>(null) }
+    var cardFailed by remember(previewKey) { mutableStateOf(false) }
+    var playlist by remember(playlistKey) { mutableStateOf<PlaylistDetails?>(null) }
+    LaunchedEffect(previewKey, playlistKey) {
+        card = null
+        cardFailed = false
+        playlist = null
+        val loaded = withContext(Dispatchers.IO) {
+            if (playlistKey != null) {
+                val details = YoutubeTitles.playlist(playlistKey)
+                val thumb = details?.videos?.firstOrNull()?.thumbnailUrl?.let { YoutubeTitles.image(it) }
+                val preview = details?.let { YoutubePreview(it.title, "Playlist", thumb) }
+                preview to details
+            } else if (previewKey != null) {
+                YoutubeTitles.preview(previewKey) to null
+            } else {
+                null to null
+            }
+        }
+        card = loaded.first
+        playlist = loaded.second
+        cardFailed = previewKey != null && loaded.first == null
+    }
+    val songId = if (playlistKey == null) previewKey else null
+    var checked by remember(playlistKey, songId) { mutableStateOf(setOf<String>()) }
+    var seeded by remember(playlistKey, songId) { mutableStateOf(false) }
+    LaunchedEffect(playlist, songId) {
+        if (seeded) return@LaunchedEffect
+        val ids = if (playlistKey != null) playlist?.videos?.map { it.videoId }.orEmpty() else listOfNotNull(songId)
+        if (ids.isNotEmpty()) {
+            checked = ids.toSet()
+            seeded = true
         }
     }
-    LaunchedEffect(Unit) {
-        delay(1_600)
-        playIntro = false
+    val canSend = selected != null && target != null && when {
+        playlistKey != null && playlist?.videos.isNullOrEmpty() -> true
+        else -> checked.isNotEmpty()
     }
-    BackHandler(enabled = searchOpen) { closeSearch() }
-    BackHandler(enabled = creating) { creating = false }
     Box(Modifier.fillMaxSize()) {
     Column(
         Modifier.fillMaxSize().padding(padding).padding(horizontal = 8.dp),
@@ -1093,7 +1142,7 @@ private fun ShareScreen(
         if (target == null) {
             Text(shareHeadline(parsed), style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onBackground)
         } else {
-            LinkPreview(previewId(target, choice))
+            LinkPreview(card, cardFailed)
         }
         if (target is YoutubeTarget.VideoAndPlaylist) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1102,76 +1151,73 @@ private fun ShareScreen(
             }
         }
         Text("Choose a folder", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.labelLarge)
-        QueueSearchBar(searchOpen, query, { query = it }, searchFocus)
+        OutlinedTextField(
+            value = if (typing) query else selected.orEmpty(),
+            onValueChange = { next ->
+                menuOpen = true
+                query = if (!typing && selected != null && next.startsWith(selected!!)) next.removePrefix(selected!!) else next
+                typing = true
+            },
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
+            label = { Text("Search folders") },
+            leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
+            trailingIcon = if (selected != null && !typing) {
+                { Icon(Icons.Filled.Check, contentDescription = "Selected", tint = SoftPink) }
+            } else {
+                null
+            },
+            interactionSource = fieldSource,
+            textStyle = MaterialTheme.typography.bodyLarge.copy(
+                fontWeight = if (selected != null && !typing) FontWeight.Bold else FontWeight.Normal,
+            ),
+            colors = searchFieldColors(if (selected != null && !typing) SoftPink else Color.White),
+        )
         Box(Modifier.weight(1f)) {
-            val needle = query.trim()
-            val folders = library.folders.filter { !it.removePending && (needle.isEmpty() || it.name.contains(needle, ignoreCase = true)) }
-            LazyColumn(
-                Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(bottom = 96.dp),
+            val needle = if (typing) query.trim() else ""
+            val folders = if (!menuOpen) {
+                emptyList()
+            } else {
+                library.folders.filter { !it.removePending && (needle.isEmpty() || it.name.contains(needle, ignoreCase = true)) }
+            }
+            Column(
+                Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 96.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                if (needle.isNotEmpty() && folders.isEmpty()) {
-                    item { Text("No folder matches that search.", color = MaterialTheme.colorScheme.onBackground) }
+                if (selected != null) {
+                    SavePaths(library, selected!!, playlistKey, playlist, songId, card?.title, checked) { id ->
+                        checked = if (id in checked) checked - id else checked + id
+                    }
                 }
-                itemsIndexed(folders, key = { _, folder -> folder.name }) { index, folder ->
-                    val picked = selected == folder.name
-                    PopIn(index, playIntro) {
+                if (menuOpen && needle.isNotEmpty() && folders.isEmpty()) {
+                    Text("No folder matches that search.", color = MaterialTheme.colorScheme.onBackground)
+                }
+                if (menuOpen) folders.forEach { folder ->
                     Card(
-                        onClick = { selected = if (picked) null else folder.name },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .then(if (picked) Modifier.border(3.dp, SoftPink, RoundedCornerShape(16.dp)) else Modifier),
-                        shape = RoundedCornerShape(16.dp),
-                        colors = if (picked) {
-                            CardDefaults.cardColors(
-                                containerColor = SoftPink.copy(alpha = 0.22f),
-                                contentColor = Color.White,
-                            )
-                        } else {
-                            CardDefaults.cardColors(
-                                containerColor = Color.White.copy(alpha = 0.16f),
-                                contentColor = SoftPink,
-                            )
+                        onClick = {
+                            selected = folder.name
+                            query = ""
+                            typing = false
+                            menuOpen = false
+                            focus.clearFocus()
                         },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = Color.White.copy(alpha = 0.16f),
+                            contentColor = Color.White,
+                        ),
                     ) {
-                        Row(
+                        Text(
+                            folder.name,
                             Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text(
-                                folder.name,
-                                Modifier.weight(1f),
-                                color = Color.White,
-                                style = MaterialTheme.typography.titleMedium,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                            if (picked) {
-                                Text("Selected", style = MaterialTheme.typography.labelMedium, color = SoftPink, fontWeight = FontWeight.Bold)
-                            }
-                        }
-                    }
+                            color = Color.White,
+                            style = MaterialTheme.typography.titleMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
                     }
                 }
-            }
-            if (!searchOpen) {
-                FloatingActionButton(
-                    onClick = { searchOpen = true },
-                    modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 16.dp),
-                    containerColor = SoftPink,
-                    contentColor = Color.Black,
-                ) {
-                    Icon(Icons.Filled.Search, contentDescription = "Search folders")
-                }
-            }
-            SmallFloatingActionButton(
-                onClick = { if (!busy) creating = true },
-                modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
-                containerColor = SoftPink,
-                contentColor = Color.Black,
-            ) {
-                Icon(Icons.Filled.CreateNewFolder, contentDescription = "New folder")
             }
         }
     }
@@ -1185,11 +1231,33 @@ private fun ShareScreen(
             CircularProgressIndicator(Modifier.size(96.dp), color = Color.White, strokeWidth = 8.dp)
         }
     }
+    Row(
+        Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 16.dp, vertical = 16.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        NewFolderButton(enabled = !busy, onClick = { creating = true })
+        SendMark(
+            tint = if (canSend) SoftPink else SoftPink.copy(alpha = 0.35f),
+            modifier = Modifier.clickable(enabled = canSend && !busy) {
+            val folder = selected ?: return@clickable
+            val videos = playlist?.videos.orEmpty()
+            if (playlistKey != null && videos.isNotEmpty() && checked.size < videos.size) {
+                model.enqueueVideos(folder, videos.filter { it.videoId in checked }.map { it.videoId to it.title })
+            } else if (target != null && (playlistKey != null || songId in checked)) {
+                model.enqueue(text, folder, choice)
+            }
+            },
+        )
+    }
     }
     if (creating) {
         NameDialog("New folder", "Queue folder", { creating = false }) { name ->
             creating = false
             selected = name.trim()
+            query = ""
+            typing = false
+            menuOpen = false
             model.makeFolder(name)
         }
     }
@@ -1197,11 +1265,70 @@ private fun ShareScreen(
 
 @Composable
 private fun StatusScreen(padding: PaddingValues, library: LibraryView) {
+    var historyOpen by rememberSaveable { mutableStateOf(false) }
+    var swipe by remember { mutableStateOf(0f) }
     Column(
-        Modifier.fillMaxSize().padding(padding).padding(20.dp).verticalScroll(rememberScrollState()),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
+        Modifier
+            .fillMaxSize()
+            .padding(padding)
+            .pointerInput(historyOpen) {
+                detectHorizontalDragGestures(
+                    onDragEnd = {
+                        if (swipe <= -72.dp.toPx()) historyOpen = true
+                        if (swipe >= 72.dp.toPx()) historyOpen = false
+                        swipe = 0f
+                    },
+                    onHorizontalDrag = { _, amount -> swipe += amount },
+                )
+            },
     ) {
-        if (library.activity.isEmpty()) {
+        BoxWithConstraints(Modifier.fillMaxWidth().height(92.dp)) {
+            val line = maxWidth * 0.42f
+            val target = if (historyOpen) maxWidth * 0.75f - line / 2 else maxWidth * 0.25f - line / 2
+            val slide by animateDpAsState(target, tween(340), label = "statusLine")
+            Row(Modifier.fillMaxSize()) {
+                StatusTab(Modifier.weight(1f), onClick = { historyOpen = false }) {
+                    WaitingSpinner(Modifier.size(53.dp))
+                }
+                StatusTab(Modifier.weight(1f), onClick = { historyOpen = true }) {
+                    Image(
+                        painterResource(app.yttopc.R.drawable.ic_status_history),
+                        contentDescription = "History",
+                        colorFilter = ColorFilter.tint(SoftPink),
+                        modifier = Modifier.size(56.dp),
+                    )
+                }
+            }
+            Box(Modifier.align(Alignment.BottomStart).offset(x = slide).width(line).padding(bottom = 6.dp)) {
+                Box(Modifier.fillMaxWidth().height(10.dp).background(SoftPink.copy(alpha = 0.38f), RoundedCornerShape(10.dp)))
+                Box(
+                    Modifier.align(Alignment.Center).fillMaxWidth().height(3.dp).background(SoftPink, RoundedCornerShape(8.dp)),
+                )
+            }
+        }
+        Column(
+            Modifier.fillMaxSize().padding(20.dp).verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+        if (historyOpen) {
+            if (library.history.isEmpty()) {
+                Text("Nothing yet.", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            } else {
+                library.history.asReversed().forEach { item ->
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(item.status.replaceFirstChar { it.uppercase() }, color = SoftPink, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+                        Text(
+                            if (item.folder.isBlank()) item.title else "${item.title} · ${item.folder}",
+                            style = MaterialTheme.typography.titleMedium,
+                        )
+                        val whenText = statusWhen(item.at)
+                        if (whenText.isNotEmpty()) {
+                            Text(whenText, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
+            }
+        } else if (library.activity.isEmpty()) {
             Text("Nothing left.", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         } else {
             Text(
@@ -1221,6 +1348,49 @@ private fun StatusScreen(padding: PaddingValues, library: LibraryView) {
                         Text(whenText, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
                     }
                 }
+            }
+        }
+        }
+    }
+}
+
+@Composable
+private fun StatusTab(
+    modifier: Modifier,
+    onClick: () -> Unit,
+    icon: @Composable () -> Unit,
+) {
+    Box(
+        modifier.fillMaxHeight().clickable(onClick = onClick).padding(bottom = 16.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        icon()
+    }
+}
+
+@Composable
+private fun WaitingSpinner(modifier: Modifier = Modifier) {
+    val spin = rememberInfiniteTransition(label = "waiting")
+    val angle by spin.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(tween(900, easing = LinearEasing)),
+        label = "waitingAngle",
+    )
+    Canvas(modifier.rotate(angle)) {
+        val bars = 12
+        val radius = size.minDimension / 2f
+        val thickness = radius * 0.18f
+        val length = radius * 0.34f
+        for (index in 0 until bars) {
+            val alpha = 0.18f + 0.82f * ((bars - index) / bars.toFloat())
+            drawRotate(index * (360f / bars), center) {
+                drawRoundRect(
+                    color = SoftPink.copy(alpha = alpha),
+                    topLeft = androidx.compose.ui.geometry.Offset(center.x - thickness / 2f, center.y - radius + thickness),
+                    size = androidx.compose.ui.geometry.Size(thickness, length),
+                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(thickness, thickness),
+                )
             }
         }
     }
@@ -1245,6 +1415,13 @@ private fun SettingsScreen(
         LabeledValue("List Name", library.libraryName?.takeIf { it.isNotBlank() } ?: "Not set")
         LabeledValue("Location", musicPath(library))
         LabeledValue("Drive", state.driveFolderName ?: "Not chosen")
+        Button(
+            onClick = model::toggleWallpaper,
+            modifier = Modifier.width(220.dp).align(Alignment.CenterHorizontally),
+            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFFEB3B), contentColor = Color.Black),
+        ) {
+            Text(if (state.wallpaper) "Use black background" else "Use default wallpaper", maxLines = 1)
+        }
         Button(
             onClick = model::changeDriveFolder,
             modifier = Modifier.width(220.dp).align(Alignment.CenterHorizontally),
@@ -1410,13 +1587,7 @@ private fun previewId(target: YoutubeTarget, choice: ShareChoice): String = when
 }
 
 @Composable
-private fun LinkPreview(id: String) {
-    var preview by remember(id) { mutableStateOf<YoutubePreview?>(null) }
-    var failed by remember(id) { mutableStateOf(false) }
-    LaunchedEffect(id) {
-        val loaded = withContext(Dispatchers.IO) { YoutubeTitles.preview(id) }
-        if (loaded == null) failed = true else preview = loaded
-    }
+private fun LinkPreview(preview: YoutubePreview?, failed: Boolean) {
     Card(modifier = Modifier.fillMaxWidth(), colors = homeTileColors(), shape = RoundedCornerShape(16.dp)) {
         Row(
             Modifier.padding(12.dp),
@@ -1522,10 +1693,11 @@ private fun FolderTile(folder: FolderView, selected: Boolean, onClick: () -> Uni
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
     ) {
         Row(
-            Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+            Modifier.padding(start = 4.dp, end = 8.dp, top = 10.dp, bottom = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            TileMark()
+            Column(Modifier.weight(1f).padding(start = 12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(
                     folder.name,
                     color = Color.White,
@@ -1579,20 +1751,91 @@ private fun PinkDotLoader(modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun FadeLine() {
+private fun TileMark() {
     Box(
         Modifier
-            .padding(top = 8.dp)
-            .fillMaxWidth()
-            .height(1.dp)
-            .background(
-                Brush.horizontalGradient(
-                    0f to Color.White,
-                    0.45f to Color.White.copy(alpha = 0.45f),
-                    1f to Color.White.copy(alpha = 0f),
-                ),
-            ),
+            .width(8.dp)
+            .height(34.dp)
+            .background(SoftPink, RoundedCornerShape(5.dp)),
     )
+}
+
+@Composable
+private fun LinkMark(tint: Color, modifier: Modifier = Modifier) {
+    Image(
+        painterResource(app.yttopc.R.drawable.ic_chain_link),
+        contentDescription = "Paste YouTube link",
+        colorFilter = ColorFilter.tint(tint),
+        modifier = modifier,
+    )
+}
+
+@Composable
+private fun SendMark(tint: Color, modifier: Modifier = Modifier) {
+    Image(
+        painterResource(app.yttopc.R.drawable.ic_send_arrow),
+        contentDescription = "Queue",
+        contentScale = ContentScale.Fit,
+        modifier = modifier.size(72.dp).graphicsLayer { alpha = tint.alpha },
+    )
+}
+
+@Composable
+private fun FadeLine() {
+    Box(Modifier.fillMaxWidth().height(14.dp)) {
+        Box(
+            Modifier
+                .align(Alignment.CenterStart)
+                .width(1.5.dp)
+                .fillMaxHeight()
+                .background(
+                    Brush.verticalGradient(
+                        0f to Color.Transparent,
+                        0.5f to Color.White,
+                        1f to Color.Transparent,
+                    ),
+                ),
+        )
+        Box(
+            Modifier
+                .align(Alignment.CenterStart)
+                .fillMaxWidth()
+                .height(1.dp)
+                .background(
+                    Brush.horizontalGradient(
+                        0f to Color.White,
+                        0.45f to Color.White.copy(alpha = 0.45f),
+                        1f to Color.Transparent,
+                    ),
+                ),
+        )
+    }
+}
+
+@Composable
+private fun StorageMark(modifier: Modifier = Modifier) {
+    Canvas(modifier) {
+        val stroke = size.minDimension * 0.28f
+        val inset = stroke / 2f
+        drawArc(
+            color = SoftPink,
+            startAngle = 28f,
+            sweepAngle = 292f,
+            useCenter = false,
+            topLeft = Offset(inset, inset),
+            size = Size(size.width - stroke, size.height - stroke),
+            style = Stroke(width = stroke, cap = StrokeCap.Butt),
+        )
+    }
+}
+
+@Composable
+private fun BackToTop(visible: Boolean, onClick: () -> Unit) {
+    AnimatedVisibility(visible = visible, enter = fadeIn(tween(180)), exit = fadeOut(tween(120))) {
+        SmallFloatingActionButton(onClick = onClick, containerColor = SoftPink, contentColor = Color.Black) {
+            Icon(Icons.Filled.KeyboardArrowUp, contentDescription = "Back to top")
+        }
+    }
 }
 
 private val SoftPink = Color(0xFFFF9BE3)
@@ -1611,9 +1854,105 @@ private fun panelColors() = CardDefaults.cardColors(
 )
 
 @Composable
-private fun searchFieldColors() = OutlinedTextFieldDefaults.colors(
-    focusedTextColor = Color.White,
-    unfocusedTextColor = Color.White,
+private fun NewFolderButton(enabled: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
+    Box(
+        modifier
+            .size(80.dp)
+            .clip(CircleShape)
+            .background(if (enabled) SoftPink else SoftPink.copy(alpha = 0.4f))
+            .clickable(enabled = enabled, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(Icons.Filled.Add, contentDescription = "New folder", tint = Color.Black, modifier = Modifier.size(42.dp))
+    }
+}
+
+@Composable
+private fun SavePaths(
+    library: LibraryView,
+    folder: String,
+    playlistKey: String?,
+    playlist: PlaylistDetails?,
+    songId: String?,
+    songTitle: String?,
+    checked: Set<String>,
+    onToggle: (String) -> Unit,
+) {
+    val root = library.pendingLibraryRoot ?: library.libraryRoot
+    val many = playlistKey != null
+    Text(if (many) "Saved paths:" else "Saved path:", color = Color.White, fontWeight = FontWeight.Bold)
+    if (root.isNullOrBlank()) {
+        Text("The laptop has not reported a music folder yet.", color = Color.White, style = MaterialTheme.typography.bodySmall)
+        return
+    }
+    if (playlistKey != null) {
+        if (playlist == null) {
+            Text("Loading playlist…", color = Color.White, style = MaterialTheme.typography.bodySmall)
+        } else if (playlist.videos.isEmpty()) {
+            Text(savePath(root, folder), color = Color.White, style = MaterialTheme.typography.bodyMedium)
+        } else {
+            playlist.videos.forEach { video ->
+                QueuePick(
+                    video.title,
+                    savePath(root, folder, saveFileName(video.title)),
+                    video.videoId in checked,
+                ) { onToggle(video.videoId) }
+            }
+        }
+    } else if (songId != null) {
+        val file = songTitle?.takeIf { it.isNotBlank() }?.let(::saveFileName)
+        QueuePick(
+            songTitle?.takeIf { it.isNotBlank() } ?: "This song",
+            savePath(root, folder, file),
+            songId in checked,
+        ) { onToggle(songId) }
+    }
+}
+
+@Composable
+private fun QueuePick(title: String, path: String, on: Boolean, onClick: () -> Unit) {
+    val color = if (on) SoftPink else Color.White
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .border(2.dp, color, RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Text(
+            title,
+            color = color,
+            fontWeight = FontWeight.SemiBold,
+            minLines = 2,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+        if (on) {
+            Text(path, color = color, style = MaterialTheme.typography.bodySmall)
+        }
+    }
+}
+
+private fun savePath(root: String, folder: String, file: String? = null): String {
+    val sep = if (root.contains('\\')) "\\" else "/"
+    val base = root.trimEnd('\\', '/') + sep + folder
+    return if (file.isNullOrBlank()) base else base + sep + file
+}
+
+private fun saveFileName(title: String): String {
+    val invalid = charArrayOf('<', '>', ':', '"', '/', '\\', '|', '?', '*')
+    var name = title.map { char -> if (char in invalid || char.code < 32) ' ' else char }.joinToString("")
+    name = name.trim().trimEnd('.', ' ')
+    if (name.length > 80) name = name.take(80).trim()
+    if (name.isBlank()) name = "track"
+    return "$name.mp3"
+}
+
+@Composable
+private fun searchFieldColors(text: Color = Color.White) = OutlinedTextFieldDefaults.colors(
+    focusedTextColor = text,
+    unfocusedTextColor = text,
     focusedContainerColor = Color.Black,
     unfocusedContainerColor = Color.Black,
     focusedLabelColor = Color.White,

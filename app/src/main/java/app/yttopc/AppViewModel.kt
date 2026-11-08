@@ -7,8 +7,11 @@ import androidx.activity.result.IntentSenderRequest
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import app.yttopc.core.Command
+import app.yttopc.core.FolderNames
 import app.yttopc.core.LibraryView
 import app.yttopc.core.Queue
+import app.yttopc.core.SongNames
+import app.yttopc.core.including
 import app.yttopc.core.withKnownTitles
 import app.yttopc.core.QueueResult
 import app.yttopc.core.ParseResult
@@ -19,6 +22,7 @@ import app.yttopc.data.DriveAuth
 import app.yttopc.data.DriveFiles
 import app.yttopc.data.DriveFolder
 import app.yttopc.data.LoadedNotebook
+import app.yttopc.data.LocalQueue
 import app.yttopc.data.NeedsSignIn
 import app.yttopc.data.NotebookRepository
 import app.yttopc.data.QueueNotifier
@@ -35,6 +39,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.time.Instant
+import java.util.UUID
 import java.net.ConnectException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
@@ -60,20 +66,38 @@ data class UiState(
     val offline: Boolean = false,
     val storage: app.yttopc.data.StorageReport? = null,
     val lastRefreshed: Long? = null,
+    val wallpaper: Boolean = false,
 )
 
 class AppViewModel(app: Application) : AndroidViewModel(app) {
     private val repository = NotebookRepository(app)
+    private val localQueue = LocalQueue(app)
+    private var driveLibrary = LibraryView(null, null, false, emptyList())
     private val backStack = ArrayDeque<Screen>()
     private val knownTitles = mutableMapOf<String, String>()
     private val missedTitles = mutableSetOf<String>()
     private var refreshJob: Job? = null
     private var refreshGeneration = 0
-    private val _state = MutableStateFlow(UiState())
+    private val _state = MutableStateFlow(UiState(wallpaper = repository.wallpaperOn()))
     val state: StateFlow<UiState> = _state
 
     init {
+        val cached = repository.cached()
+        if (cached != null && repository.folderId() != null) {
+            localQueue.dropUploaded(cached.commands.map { it.id }.toSet())
+            driveLibrary = Queue(cached.commands, cached.state).view.copy(history = cached.history)
+            _state.value = UiState(
+                loading = false,
+                signedIn = true,
+                notebookChosen = true,
+                driveFolderName = repository.folderName(),
+                library = shown(),
+                storage = cached.storage,
+                wallpaper = repository.wallpaperOn(),
+            )
+        }
         refresh()
+        flush()
     }
 
     fun refresh() {
@@ -127,18 +151,23 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                             )
                         }
                     }
-                    is LoadedNotebook.Ready -> _state.update {
-                        it.copy(
-                            loading = false,
-                            busy = it.busy,
-                            signedIn = true,
-                            notebookChosen = true,
-                            offline = false,
-                            driveFolderName = folderName,
-                            library = present(Queue(loaded.commands, loaded.state).view),
-                            storage = loaded.storage ?: it.storage,
-                            lastRefreshed = System.currentTimeMillis(),
-                        )
+                    is LoadedNotebook.Ready -> {
+                        localQueue.dropUploaded(loaded.commands.map { it.id }.toSet())
+                        driveLibrary = Queue(loaded.commands, loaded.state).view.copy(history = loaded.history)
+                        _state.update {
+                            it.copy(
+                                loading = false,
+                                busy = it.busy,
+                                signedIn = true,
+                                notebookChosen = true,
+                                offline = false,
+                                driveFolderName = folderName,
+                                library = shown(),
+                                storage = loaded.storage ?: it.storage,
+                                lastRefreshed = System.currentTimeMillis(),
+                            )
+                        }
+                        flush()
                     }
                 }
             } catch (error: Exception) {
@@ -231,6 +260,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun chooseDriveFolder(folder: DriveFolder) {
+        if (repository.folderId() != folder.id) localQueue.clear()
         repository.saveFolder(folder.id, folder.name)
         refresh()
     }
@@ -282,8 +312,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             runCatching { DriveAuth.revoke(getApplication()) }
             repository.clear()
+            localQueue.clear()
             backStack.clear()
-            _state.value = UiState(loading = false)
+            _state.value = UiState(loading = false, wallpaper = repository.wallpaperOn())
         }
     }
 
@@ -308,7 +339,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun openShare(text: String, folder: String? = null) {
         val current = _state.value.screen
         if (current !is Screen.Share) backStack.addLast(current)
-        _state.update { it.copy(screen = Screen.Share(text, folder)) }
+        val chosen = folder
+            ?: repository.lastMusicFolder()
+            ?: _state.value.library.folders.firstOrNull { !it.removePending }?.name
+        _state.update { it.copy(screen = Screen.Share(text, chosen)) }
     }
 
     fun pasteLink(folder: String? = null) {
@@ -336,76 +370,193 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(message = null) }
     }
 
-    fun makeFolder(name: String) = submit("Folder queued.", { it.makeFolder(name) })
+    fun toggleWallpaper() {
+        val next = !repository.wallpaperOn()
+        repository.setWallpaper(next)
+        _state.update { it.copy(wallpaper = next) }
+    }
 
-    fun removeFolder(name: String) = submit("Folder will be deleted when it is empty on the laptop.", { it.removeFolder(name) })
+    fun makeFolder(name: String) {
+        FolderNames.problem(name)?.let { return rejectEnqueue(it) }
+        val cleaned = FolderNames.cleaned(name)
+        val existing = _state.value.library.folders.find { FolderNames.same(it.name, cleaned) }
+        if (existing != null && existing.createError == null) return rejectEnqueue("That folder already exists.")
+        if (existing?.removePending == true) return rejectEnqueue("That folder is waiting to be deleted.")
+        queueLocal(listOf(Command.MakeFolder(newId(), now(), cleaned)), "Folder queued.")
+    }
+
+    fun removeFolder(name: String) {
+        val folder = _state.value.library.folders.find { FolderNames.same(it.name, name) }
+            ?: return rejectEnqueue("That folder is not in the queue.")
+        if (!folder.canRemove) return rejectEnqueue("That folder still has songs or a queued download.")
+        queueLocal(
+            listOf(Command.RemoveFolder(newId(), now(), folder.name)),
+            "Folder will be deleted when it is empty on the laptop.",
+        )
+    }
 
     fun deleteTrack(folder: String, videoId: String) = deleteTracks(folder, listOf(videoId))
 
     fun deleteTracks(folder: String, videoIds: List<String>) {
         val ids = videoIds.distinct()
-        if (ids.isEmpty() || _state.value.busy) return
-        _state.update { it.copy(busy = true) }
-        viewModelScope.launch {
-            try {
-                val token = DriveAuth.authorize(getApplication()) ?: throw NeedsSignIn()
-                val loaded = withContext(Dispatchers.IO) { repository.load(token) }
-                if (loaded !is LoadedNotebook.Ready) {
-                    _state.update { it.copy(busy = false, message = "Choose the Drive folder first.") }
-                    return@launch
-                }
-                var commands = loaded.commands
-                val fresh = mutableListOf<Command>()
-                for (id in ids) {
-                    when (val result = Queue(commands, loaded.state).deleteTrack(folder, id)) {
-                        is QueueResult.Rejected -> {
-                            if (fresh.isEmpty()) {
-                                _state.update { it.copy(busy = false, message = result.reason) }
-                                return@launch
-                            }
-                        }
-                        is QueueResult.Append -> {
-                            fresh += result.command
-                            commands = commands + result.command
-                        }
-                    }
-                }
-                withContext(Dispatchers.IO) { repository.appendAll(token, fresh) }
-                if (fresh.size == 1) {
-                    announce(fresh.first())
-                } else {
-                    runCatching {
-                        QueueNotifier.show(
-                            getApplication(),
-                            fresh.first().id.hashCode(),
-                            "Delete queued",
-                            "${fresh.size} songs · $folder",
-                        )
-                    }
-                }
-                val again = withContext(Dispatchers.IO) { repository.load(token) }
-                val library = if (again is LoadedNotebook.Ready) {
-                    present(Queue(again.commands, again.state).view)
-                } else {
-                    _state.value.library
-                }
-                val message = if (fresh.size == 1) "Delete queued." else "${fresh.size} deletes queued."
-                _state.update { it.copy(busy = false, library = library, notebookChosen = true, message = message) }
-            } catch (error: Exception) {
-                if (error is CancellationException) throw error
-                _state.update { it.copy(busy = false, message = error.message ?: "Could not update the queue.") }
+        if (ids.isEmpty()) return
+        val home = _state.value.library.folders.find { FolderNames.same(it.name, folder) }
+            ?: return rejectEnqueue("That folder is not in the queue.")
+        val fresh = mutableListOf<Command>()
+        var rejection: String? = null
+        for (id in ids) {
+            val track = home.tracks.find { it.videoId == id }
+            when {
+                track == null -> if (rejection == null) rejection = "That song is not in this folder."
+                track.deletePending -> if (rejection == null) rejection = "That song is already waiting to be deleted."
+                else -> fresh += Command.DeleteTrack(newId(), now(), home.name, id)
             }
         }
+        if (fresh.isEmpty()) return rejectEnqueue(rejection ?: "That song is not in this folder.")
+        val message = if (fresh.size == 1) "Delete queued." else "${fresh.size} deletes queued."
+        queueLocal(fresh, message)
     }
+
+    private fun queueLocal(commands: List<Command>, message: String) {
+        commands.forEach { localQueue.add(it) }
+        _state.update { it.copy(library = shown(), message = message) }
+        if (commands.size == 1) {
+            announce(commands.first())
+        } else {
+            val first = commands.first()
+            val folder = (first as? Command.DeleteTrack)?.folder ?: ""
+            runCatching {
+                QueueNotifier.show(getApplication(), first.id.hashCode(), "Delete queued", "${commands.size} songs · $folder")
+            }
+        }
+        flush()
+    }
+
+    private fun newId() = UUID.randomUUID().toString()
+
+    private fun now() = Instant.now().toString()
 
     fun retry(commandId: String) = submit("Retry queued.", { it.retry(commandId) })
 
     fun enqueue(text: String, folder: String, choice: ShareChoice) {
-        if (_state.value.busy) return
-        _state.update { it.copy(busy = true) }
-        viewModelScope.launch {
-            val resolved = if (choice == ShareChoice.SONG) resolvedTitle(text) else null
-            finish("Queued.", goHome = true) { it.enqueue(text, folder, choice, resolved) }
+        val library = _state.value.library
+        val target = when (val parsed = YoutubeLinks.parse(text)) {
+            is ParseResult.Found -> parsed.target
+            ParseResult.NotALink -> return rejectEnqueue("That share does not contain a link.")
+            ParseResult.NotYoutube -> return rejectEnqueue("Share a YouTube song or playlist.")
+        }
+        val destination = library.folders.find { FolderNames.same(it.name, folder) }
+        if (destination?.removePending == true) return rejectEnqueue("That folder is waiting to be deleted.")
+        if (folder.isBlank()) return rejectEnqueue("Choose a folder first.")
+        val command = when (choice) {
+            ShareChoice.SONG -> songCommand(target, destination, folder) ?: return
+            ShareChoice.PLAYLIST -> playlistCommand(target, destination, folder) ?: return
+        }
+        rememberFolder(command)
+        localQueue.add(command)
+        backStack.clear()
+        _state.update { it.copy(library = shown(), message = "Queued.", screen = Screen.Home) }
+        announce(command)
+        flush()
+    }
+
+    fun enqueueVideos(folder: String, videos: List<Pair<String, String>>) {
+        if (folder.isBlank()) return rejectEnqueue("Choose a folder first.")
+        if (videos.isEmpty()) return rejectEnqueue("Choose at least one video.")
+        val destination = _state.value.library.folders.find { FolderNames.same(it.name, folder) }
+        if (destination?.removePending == true) return rejectEnqueue("That folder is waiting to be deleted.")
+        val commands = videos.mapNotNull { (videoId, _) ->
+            if (destination != null && destination.tracks.any { it.videoId == videoId && it.blocksRemoval() }) {
+                null
+            } else {
+                Command.EnqueueVideo(newId(), now(), "https://www.youtube.com/watch?v=$videoId", videoId, destination?.name ?: folder)
+            }
+        }
+        if (commands.isEmpty()) return rejectEnqueue("Those songs are already in this folder.")
+        commands.forEach { localQueue.add(it) }
+        rememberFolder(commands.first())
+        backStack.clear()
+        val message = if (commands.size == 1) "Queued." else "${commands.size} songs queued."
+        _state.update { it.copy(library = shown(), message = message, screen = Screen.Home) }
+        if (commands.size == 1) announce(commands.first())
+        flush()
+    }
+
+    private fun rejectEnqueue(reason: String) {
+        _state.update { it.copy(message = reason) }
+    }
+
+    private fun songCommand(target: YoutubeTarget, folder: app.yttopc.core.FolderView?, folderName: String): Command? {
+        val videoId = when (target) {
+            is YoutubeTarget.Video -> target.videoId
+            is YoutubeTarget.VideoAndPlaylist -> target.videoId
+            is YoutubeTarget.Playlist -> return rejectEnqueue("That link is a playlist. Save the whole playlist.").let { null }
+        }
+        if (folder != null && folder.tracks.any { it.videoId == videoId && it.blocksRemoval() }) {
+            return rejectEnqueue("That song is already in this folder.").let { null }
+        }
+        val known = knownTitles[videoId]
+        if (folder != null && !known.isNullOrBlank() && folder.tracks.any { it.videoId != videoId && SongNames.same(it.title, known) && it.blocksRemoval() }) {
+            return rejectEnqueue("That song is already in this folder.").let { null }
+        }
+        return Command.EnqueueVideo(newId(), now(), target.url, videoId, folder?.name ?: folderName)
+    }
+
+    private fun playlistCommand(target: YoutubeTarget, folder: app.yttopc.core.FolderView?, folderName: String): Command? {
+        val playlistId = when (target) {
+            is YoutubeTarget.Playlist -> target.playlistId
+            is YoutubeTarget.VideoAndPlaylist -> target.playlistId
+            is YoutubeTarget.Video -> return rejectEnqueue("That link is a single song.").let { null }
+        }
+        if (folder != null && folder.albums.any { it.playlistId == playlistId && it.blocksRemoval() }) {
+            return rejectEnqueue("That playlist is already queued for this folder.").let { null }
+        }
+        return Command.EnqueuePlaylist(newId(), now(), target.url, playlistId, folder?.name ?: folderName)
+    }
+
+    private fun rememberFolder(command: Command) {
+        val name = when (command) {
+            is Command.EnqueueVideo -> command.folder
+            is Command.EnqueuePlaylist -> command.folder
+            else -> return
+        }
+        repository.rememberMusicFolder(name)
+    }
+
+    private var flushJob: Job? = null
+
+    private fun flush() {
+        if (flushJob?.isActive == true) return
+        flushJob = viewModelScope.launch {
+            try {
+                while (true) {
+                    val next = localQueue.read().firstOrNull { !it.uploaded && it.rejected == null } ?: break
+                    val command = next.command
+                    if (command is Command.EnqueueVideo) {
+                        val title = resolvedTitle(command.url)
+                        val home = driveLibrary.folders.find { FolderNames.same(it.name, command.folder) }
+                        if (!title.isNullOrBlank() && home != null && home.tracks.any {
+                                it.videoId != command.videoId && SongNames.same(it.title, title) && it.blocksRemoval()
+                            }
+                        ) {
+                            localQueue.reject(command.id, "That song is already in this folder.")
+                            _state.update { it.copy(library = shown(), message = "That song is already in this folder.") }
+                            continue
+                        }
+                    }
+                    try {
+                        val token = DriveAuth.authorize(getApplication()) ?: break
+                        withContext(Dispatchers.IO) { repository.append(token, command) }
+                        localQueue.markUploaded(command.id)
+                        _state.update { it.copy(library = shown()) }
+                    } catch (error: Exception) {
+                        if (error is CancellationException) throw error
+                        break
+                    }
+                }
+            } finally {
+                flushJob = null
+            }
         }
     }
 
@@ -423,6 +574,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         if (!title.isNullOrBlank()) knownTitles[id] = title
         return title
     }
+
+    private fun shown(): LibraryView = present(driveLibrary.including(localQueue.read()))
 
     private fun present(library: LibraryView): LibraryView {
         val named = library.withKnownTitles(knownTitles)
@@ -487,16 +640,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                         withContext(Dispatchers.IO) { repository.append(token, result.command) }
                         announce(result.command)
                         val again = withContext(Dispatchers.IO) { repository.load(token) }
-                        val library = if (again is LoadedNotebook.Ready) {
-                            present(Queue(again.commands, again.state).view)
-                        } else {
-                            _state.value.library
+                        if (again is LoadedNotebook.Ready) {
+                            driveLibrary = Queue(again.commands, again.state).view.copy(history = again.history)
                         }
                         if (goHome) backStack.clear()
                         _state.update {
                             it.copy(
                                 busy = false,
-                                library = library,
+                                library = shown(),
                                 notebookChosen = true,
                                 message = success,
                                 screen = if (goHome) Screen.Home else it.screen,

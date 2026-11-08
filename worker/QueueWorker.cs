@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace YtToPc;
 
@@ -206,10 +207,12 @@ sealed class QueueWorker
         {
             SetStatus("Scanning Drive");
             var commands = LoadCommands();
+            _commands = commands;
             SetStatus("Checking the music folder");
             var changes = SyncFolders(state, commands);
             RecordStorage();
             var commandNotes = ApplyFastCommands(state, commands);
+            NotePendingDownloads(state, commands);
             var update = Summarize(changes.Concat(commandNotes).Where(note => note.Length > 0).ToList());
             if (update.Length > 0) SetStatus("Updating Drive: " + update);
             Save(state, force: true);
@@ -572,7 +575,13 @@ sealed class QueueWorker
             var folder = Text(command, "folder");
             var videoId = Text(command, "videoId");
             var existing = FindTrack(state, folder, videoId);
-            if (existing != null && existing.Status is "done" or "downloading" or "pending" or "skipped")
+            if (existing != null && existing.Status is "done" or "downloading" or "skipped")
+            {
+                Settle(state, command.Id, "skipped", null);
+                Save(state);
+                continue;
+            }
+            if (existing != null && existing.Status == "pending" && !string.IsNullOrEmpty(existing.CommandId) && existing.CommandId != command.Id)
             {
                 Settle(state, command.Id, "skipped", null);
                 Save(state);
@@ -713,8 +722,62 @@ sealed class QueueWorker
         state.Folders.FirstOrDefault(folder => folder.Name.Equals(folderName, StringComparison.OrdinalIgnoreCase))
             ?.Tracks.FirstOrDefault(track => track.VideoId == videoId);
 
-    private static void Settle(LibraryState state, string id, string status, string? error) =>
+    private List<JobCommand> _commands = new();
+
+    private void NotePendingDownloads(LibraryState state, List<JobCommand> commands)
+    {
+        foreach (var command in commands)
+        {
+            if (command.Type != "enqueue-video" || state.Commands.ContainsKey(command.Id)) continue;
+            var folder = Text(command, "folder");
+            var videoId = Text(command, "videoId");
+            var existing = FindTrack(state, folder, videoId);
+            if (existing != null) continue;
+            TrackFor(state, new PendingVideo(command.Id, folder, videoId, command.Id));
+        }
+    }
+
+    private void Settle(LibraryState state, string id, string status, string? error)
+    {
         state.Commands[id] = new CommandState { Status = status, Error = error };
+        if (status is "done" or "skipped" or "failed" or "expanded") RememberHistory(state, id, status, error);
+    }
+
+    private void RememberHistory(LibraryState state, string id, string status, string? error)
+    {
+        try
+        {
+            var command = _commands.FirstOrDefault(item => item.Id == id);
+            var folder = command == null ? "" : Text(command, "folder");
+            var videoId = command == null ? "" : Text(command, "videoId");
+            if (videoId.Length == 0 && command != null) videoId = Text(command, "playlistId");
+            var title = "";
+            foreach (var home in state.Folders)
+            {
+                var track = home.Tracks.FirstOrDefault(item => item.CommandId == id || (videoId.Length > 0 && item.VideoId == videoId && home.Name.Equals(folder, StringComparison.OrdinalIgnoreCase)));
+                if (track == null) continue;
+                title = string.IsNullOrWhiteSpace(track.Title) ? track.VideoId : track.Title;
+                folder = home.Name;
+                videoId = track.VideoId;
+                break;
+            }
+            if (title.Length == 0) title = folder.Length == 0 ? status : folder;
+            var line = JsonSerializer.Serialize(new HistoryLine(DateTime.UtcNow.ToString("o"), id, status, title, folder, videoId, error), HistoryJson);
+            new LibraryBook(_settings).AppendHistory(line);
+        }
+        catch (Exception)
+        {
+            // History is a record of finished work. A failed write does not stop the queue.
+        }
+    }
+
+    private static readonly JsonSerializerOptions HistoryJson = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+    };
+
+    private sealed record HistoryLine(string At, string CommandId, string Status, string Title, string Folder, string VideoId, string? Error);
 
     private string? ActiveLibraryName() =>
         string.IsNullOrWhiteSpace(_settings.LibraryName) ? null : _settings.LibraryName.Trim();

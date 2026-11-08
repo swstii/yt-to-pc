@@ -10,8 +10,13 @@ import java.util.concurrent.ConcurrentHashMap
 
 data class YoutubePreview(val title: String, val author: String, val thumbnail: Bitmap?)
 
+data class PlaylistVideo(val videoId: String, val title: String, val thumbnailUrl: String?)
+
+data class PlaylistDetails(val title: String, val videos: List<PlaylistVideo>)
+
 object YoutubeTitles {
     private val cache = ConcurrentHashMap<String, YoutubePreview>()
+    private val playlists = ConcurrentHashMap<String, PlaylistDetails>()
 
     fun lookup(id: String): String? = cache[id]?.title ?: fetch(id, withThumbnail = false)?.title
 
@@ -19,6 +24,15 @@ object YoutubeTitles {
         cache[id]?.takeIf { it.thumbnail != null }?.let { return it }
         return fetch(id, withThumbnail = true)
     }
+
+    fun playlist(id: String): PlaylistDetails? {
+        playlists[id]?.let { return it }
+        val loaded = readPlaylist(id) ?: return null
+        playlists[id] = loaded
+        return loaded
+    }
+
+    fun image(address: String): Bitmap? = readBitmap(address)
 
     private fun fetch(id: String, withThumbnail: Boolean): YoutubePreview? {
         val page = if (id.length == 11) {
@@ -39,8 +53,74 @@ object YoutubeTitles {
         return YoutubePreview(title, author, thumbnail).also { cache[id] = it }
     }
 
-    private fun readText(address: String): String? {
-        val connection = open(address)
+    private fun readPlaylist(id: String): PlaylistDetails? {
+        val feed = readText("https://www.youtube.com/feeds/videos.xml?playlist_id=" + URLEncoder.encode(id, Charsets.UTF_8.name()), browser = true)
+        val parsed = feed?.let { runCatching { parseFeed(it) }.getOrNull() }
+        if (parsed != null && (parsed.title.isNotBlank() || parsed.videos.isNotEmpty())) return parsed
+        return playlistPage(id)
+    }
+
+    private fun parseFeed(xml: String): PlaylistDetails? {
+        val parser = android.util.Xml.newPullParser()
+        parser.setFeature(org.xmlpull.v1.XmlPullParser.FEATURE_PROCESS_NAMESPACES, false)
+        parser.setInput(xml.reader())
+        var event = parser.eventType
+        var inEntry = false
+        var playlistTitle = ""
+        var currentTitle = ""
+        var currentId = ""
+        var currentThumb: String? = null
+        val videos = mutableListOf<PlaylistVideo>()
+        while (event != org.xmlpull.v1.XmlPullParser.END_DOCUMENT) {
+            when (event) {
+                org.xmlpull.v1.XmlPullParser.START_TAG -> when (parser.name.substringAfter(':')) {
+                    "entry" -> {
+                        inEntry = true
+                        currentTitle = ""
+                        currentId = ""
+                        currentThumb = null
+                    }
+                    "title" -> {
+                        val value = parser.nextText().trim()
+                        if (inEntry) currentTitle = value else if (playlistTitle.isEmpty()) playlistTitle = value
+                    }
+                    "videoId" -> currentId = parser.nextText().trim()
+                    "thumbnail" -> if (inEntry && currentThumb == null) currentThumb = parser.getAttributeValue(null, "url")
+                }
+                org.xmlpull.v1.XmlPullParser.END_TAG -> if (parser.name.substringAfter(':') == "entry") {
+                    if (currentId.isNotBlank()) {
+                        videos += PlaylistVideo(currentId, currentTitle.ifBlank { currentId }, currentThumb)
+                    }
+                    inEntry = false
+                }
+            }
+            event = parser.next()
+        }
+        if (playlistTitle.isBlank() && videos.isEmpty()) return null
+        return PlaylistDetails(playlistTitle.ifBlank { "Playlist" }, videos)
+    }
+
+    private fun playlistPage(id: String): PlaylistDetails? {
+        val html = readText("https://www.youtube.com/playlist?list=$id", browser = true) ?: return null
+        val title = Regex("""property="og:title"\s+content="([^"]+)"""")
+            .find(html)?.groupValues?.get(1)?.let(::unescape)?.trim().orEmpty()
+        val image = Regex("""property="og:image"\s+content="([^"]+)"""")
+            .find(html)?.groupValues?.get(1)?.let(::unescape)
+        if (title.isBlank() && image.isNullOrBlank()) return null
+        val thumbVideo = image?.let { Regex("""/vi/([A-Za-z0-9_-]{11})/""").find(it)?.groupValues?.get(1) }
+        val videos = if (thumbVideo == null) emptyList() else listOf(PlaylistVideo(thumbVideo, title.ifBlank { thumbVideo }, image))
+        return PlaylistDetails(title.ifBlank { "Playlist" }, videos)
+    }
+
+    private fun unescape(value: String) = value
+        .replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+
+    private fun readText(address: String, browser: Boolean = false): String? {
+        val connection = open(address, browser)
         return try {
             if (connection.responseCode != HttpURLConnection.HTTP_OK) null
             else connection.inputStream.bufferedReader().readText()
@@ -52,7 +132,7 @@ object YoutubeTitles {
     }
 
     private fun readBitmap(address: String): Bitmap? {
-        val connection = open(address)
+        val connection = open(address, browser = true)
         return try {
             if (connection.responseCode != HttpURLConnection.HTTP_OK) null
             else BitmapFactory.decodeStream(connection.inputStream)
@@ -63,9 +143,13 @@ object YoutubeTitles {
         }
     }
 
-    private fun open(address: String) = (URL(address).openConnection() as HttpURLConnection).apply {
+    private fun open(address: String, browser: Boolean = false) = (URL(address).openConnection() as HttpURLConnection).apply {
         connectTimeout = 8000
         readTimeout = 8000
-        setRequestProperty("User-Agent", "YT-to-PC")
+        instanceFollowRedirects = true
+        setRequestProperty(
+            "User-Agent",
+            if (browser) "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36" else "YT-to-PC",
+        )
     }
 }

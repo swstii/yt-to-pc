@@ -2,23 +2,55 @@ package app.yttopc.data
 
 import android.content.Context
 import app.yttopc.core.Command
+import app.yttopc.core.HistoryEntry
 import app.yttopc.core.LibraryState
 import app.yttopc.core.NotebookJson
 import org.json.JSONObject
+import java.io.File
 
 sealed class LoadedNotebook {
     data object Missing : LoadedNotebook()
-    data class Ready(val commands: List<Command>, val state: LibraryState, val storage: StorageReport? = null) : LoadedNotebook()
+    data class Ready(
+        val commands: List<Command>,
+        val state: LibraryState,
+        val storage: StorageReport? = null,
+        val history: List<HistoryEntry> = emptyList(),
+    ) : LoadedNotebook()
     data class Failed(val reason: String) : LoadedNotebook()
 }
 
 class NotebookRepository(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+    private val cacheFile = File(context.applicationContext.filesDir, "notebook-cache.json")
     private val lock = Any()
+
+    fun cached(): LoadedNotebook.Ready? {
+        val text = runCatching { cacheFile.readText() }.getOrNull() ?: return null
+        return runCatching {
+            val json = JSONObject(text)
+            val commandsText = json.optString("commands")
+            val stateText = json.optString("state")
+            val historyText = json.optString("history")
+            val state = if (stateText.isBlank()) LibraryState() else NotebookJson.readState(stateText)
+            LoadedNotebook.Ready(
+                NotebookJson.readCommands(commandsText),
+                state,
+                json.optString("storage").takeIf { it.isNotBlank() }?.let(::parseStorage),
+                NotebookJson.readHistory(historyText),
+            )
+        }.getOrNull()
+    }
 
     fun folderId(): String? = prefs.getString(KEY_FOLDER_ID, null)
 
     fun folderName(): String? = prefs.getString(KEY_FOLDER_NAME, null)
+
+    fun lastMusicFolder(): String? = prefs.getString(KEY_LAST_MUSIC_FOLDER, null)?.takeIf { it.isNotBlank() }
+
+    fun rememberMusicFolder(name: String) {
+        if (name.isBlank()) return
+        prefs.edit().putString(KEY_LAST_MUSIC_FOLDER, name).apply()
+    }
 
     fun saveFolder(id: String, name: String) {
         prefs.edit().putString(KEY_FOLDER_ID, id).putString(KEY_FOLDER_NAME, name).apply()
@@ -28,23 +60,46 @@ class NotebookRepository(context: Context) {
         prefs.edit().remove(KEY_FOLDER_ID).remove(KEY_FOLDER_NAME).apply()
     }
 
+    fun wallpaperOn(): Boolean = prefs.getBoolean(KEY_WALLPAPER, false)
+
+    fun setWallpaper(on: Boolean) {
+        prefs.edit().putBoolean(KEY_WALLPAPER, on).apply()
+    }
+
     fun clear() {
+        val wallpaper = wallpaperOn()
         prefs.edit().clear().apply()
+        if (wallpaper) prefs.edit().putBoolean(KEY_WALLPAPER, true).apply()
+        cacheFile.delete()
+    }
+
+    private fun remember(commandsText: String, stateText: String, historyText: String, storageText: String?) {
+        val json = JSONObject()
+            .put("commands", commandsText)
+            .put("state", stateText)
+            .put("history", historyText)
+            .put("storage", storageText ?: "")
+        cacheFile.writeText(json.toString())
     }
 
     fun load(token: String): LoadedNotebook {
         val folderId = folderId() ?: return LoadedNotebook.Missing
         return try {
             synchronized(lock) {
-                val commands = NotebookJson.readCommands(DriveFiles.readNamed(token, folderId, COMMANDS).orEmpty())
+                val commandsText = DriveFiles.readNamed(token, folderId, COMMANDS).orEmpty()
+                val commands = NotebookJson.readCommands(commandsText)
                 val catalog = DriveFiles.readNamed(token, folderId, LIBRARIES)
                 val active = activeLibrary(catalog)
                 val stateText = readNestedState(token, folderId, active)
                     ?: DriveFiles.readNamed(token, folderId, legacyStateName(active))
                     ?: if (active == null) null else DriveFiles.readNamed(token, folderId, STATE)
                 val state = if (stateText.isNullOrBlank()) LibraryState() else NotebookJson.readState(stateText)
-                val storage = readStorage(token, folderId, active)?.let(::parseStorage)
-                LoadedNotebook.Ready(commands, state, storage)
+                val storageText = readStorage(token, folderId, active)
+                val storage = storageText?.let(::parseStorage)
+                val historyText = DriveFiles.readNamed(token, folderId, HISTORY).orEmpty()
+                val ready = LoadedNotebook.Ready(commands, state, storage, NotebookJson.readHistory(historyText))
+                remember(commandsText, stateText.orEmpty(), historyText, storageText)
+                ready
             }
         } catch (error: Exception) {
             LoadedNotebook.Failed(error.message ?: "Could not read the queue.")
@@ -58,8 +113,11 @@ class NotebookRepository(context: Context) {
         val folderId = folderId() ?: error("Choose the Drive folder first.")
         synchronized(lock) {
             val existing = DriveFiles.readNamed(token, folderId, COMMANDS).orEmpty()
+            val present = NotebookJson.readCommands(existing).map { it.id }.toSet()
+            val fresh = commands.filter { it.id !in present }
+            if (fresh.isEmpty()) return
             val body = if (existing.isEmpty() || existing.endsWith("\n")) existing else "$existing\n"
-            val lines = commands.joinToString("") { NotebookJson.commandLine(it) + "\n" }
+            val lines = fresh.joinToString("") { NotebookJson.commandLine(it) + "\n" }
             DriveFiles.writeNamed(token, folderId, COMMANDS, body + lines)
         }
     }
@@ -68,10 +126,13 @@ class NotebookRepository(context: Context) {
         const val PREFS = "yt_to_pc"
         const val KEY_FOLDER_ID = "drive_folder_id"
         const val KEY_FOLDER_NAME = "drive_folder_name"
+        const val KEY_LAST_MUSIC_FOLDER = "last_music_folder"
+        const val KEY_WALLPAPER = "default_wallpaper"
         const val COMMANDS = "commands.jsonl"
         const val STATE = "state.json"
         const val STORAGE = "storage.json"
         const val LIBRARIES = "libraries.json"
+        const val HISTORY = "history.jsonl"
 
         fun activeLibrary(catalog: String?): String? {
             if (catalog.isNullOrBlank()) return null

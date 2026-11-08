@@ -139,6 +139,17 @@ data class StateFolder(
 )
 
 @Serializable
+data class HistoryEntry(
+    val at: String,
+    val commandId: String,
+    val status: String,
+    val title: String = "",
+    val folder: String = "",
+    val videoId: String? = null,
+    val error: String? = null,
+)
+
+@Serializable
 data class LibraryState(
     val libraryName: String? = null,
     val libraryRoot: String? = null,
