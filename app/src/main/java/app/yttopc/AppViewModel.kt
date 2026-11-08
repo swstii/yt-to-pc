@@ -48,7 +48,7 @@ import java.net.UnknownHostException
 sealed interface Screen {
     data object Home : Screen
     data class Folder(val name: String, val focusVideoId: String? = null, val focusCommandId: String? = null) : Screen
-    data class Share(val text: String, val folder: String? = null) : Screen
+    data class Share(val text: String) : Screen
     data object Settings : Screen
     data object Status : Screen
 }
@@ -344,16 +344,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(screen = screen) }
     }
 
-    fun openShare(text: String, folder: String? = null) {
+    fun openShare(text: String) {
         val current = _state.value.screen
         if (current !is Screen.Share) backStack.addLast(current)
-        val chosen = folder
-            ?: repository.lastMusicFolder()
-            ?: _state.value.library.folders.firstOrNull { !it.removePending }?.name
-        _state.update { it.copy(screen = Screen.Share(text, chosen)) }
+        _state.update { it.copy(screen = Screen.Share(text)) }
     }
 
-    fun pasteLink(folder: String? = null) {
+    fun pasteLink() {
         val text = runCatching {
             val clipboard = getApplication<Application>().getSystemService(ClipboardManager::class.java)
             clipboard?.primaryClip
@@ -368,7 +365,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             _state.update { it.copy(message = "Copy a YouTube link first.") }
             return
         }
-        openShare(text, folder)
+        openShare(text)
     }
 
     fun back() {
@@ -409,8 +406,6 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             "Folder will be deleted when it is empty on the laptop.",
         )
     }
-
-    fun deleteTrack(folder: String, videoId: String) = deleteTracks(folder, listOf(videoId))
 
     fun deleteTracks(folder: String, videoIds: List<String>) {
         val ids = videoIds.distinct()
@@ -467,7 +462,6 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             ShareChoice.SONG -> songCommand(target, destination, folder) ?: return
             ShareChoice.PLAYLIST -> playlistCommand(target, destination, folder) ?: return
         }
-        rememberFolder(command)
         localQueue.add(command)
         backStack.clear()
         _state.update { it.copy(library = shown(), message = "Queued.", screen = Screen.Home) }
@@ -489,7 +483,6 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
         if (commands.isEmpty()) return rejectEnqueue("Those songs are already in this folder.")
         commands.forEach { localQueue.add(it) }
-        rememberFolder(commands.first())
         backStack.clear()
         val message = if (commands.size == 1) "Queued." else "${commands.size} songs queued."
         commands.forEach { command ->
@@ -532,15 +525,6 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             return rejectEnqueue("That playlist is already queued for this folder.").let { null }
         }
         return Command.EnqueuePlaylist(newId(), now(), target.url, playlistId, folder?.name ?: folderName)
-    }
-
-    private fun rememberFolder(command: Command) {
-        val name = when (command) {
-            is Command.EnqueueVideo -> command.folder
-            is Command.EnqueuePlaylist -> command.folder
-            else -> return
-        }
-        repository.rememberMusicFolder(name)
     }
 
     private var flushJob: Job? = null
@@ -665,10 +649,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private fun submit(success: String, action: (Queue) -> QueueResult) {
         if (_state.value.busy) return
         _state.update { it.copy(busy = true) }
-        viewModelScope.launch { finish(success, action = action) }
+        viewModelScope.launch { finish(success, action) }
     }
 
-    private suspend fun finish(success: String, goHome: Boolean = false, action: (Queue) -> QueueResult) {
+    private suspend fun finish(success: String, action: (Queue) -> QueueResult) {
             try {
                 val token = DriveAuth.authorize(getApplication()) ?: throw NeedsSignIn()
                 val loaded = withContext(Dispatchers.IO) { repository.load(token) }
@@ -685,14 +669,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                         if (again is LoadedNotebook.Ready) {
                             runCatching { showLibrary(Queue(again.commands, again.state).view.copy(history = again.history)) }
                         }
-                        if (goHome) backStack.clear()
                         _state.update {
                             it.copy(
                                 busy = false,
                                 library = shown(),
                                 notebookChosen = true,
                                 message = success,
-                                screen = if (goHome) Screen.Home else it.screen,
                             )
                         }
                     }

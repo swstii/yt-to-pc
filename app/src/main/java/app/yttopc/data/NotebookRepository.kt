@@ -45,13 +45,6 @@ class NotebookRepository(context: Context) {
 
     fun folderName(): String? = prefs.getString(KEY_FOLDER_NAME, null)
 
-    fun lastMusicFolder(): String? = prefs.getString(KEY_LAST_MUSIC_FOLDER, null)?.takeIf { it.isNotBlank() }
-
-    fun rememberMusicFolder(name: String) {
-        if (name.isBlank()) return
-        prefs.edit().putString(KEY_LAST_MUSIC_FOLDER, name).apply()
-    }
-
     fun saveFolder(id: String, name: String) {
         prefs.edit().putString(KEY_FOLDER_ID, id).putString(KEY_FOLDER_NAME, name).apply()
     }
@@ -136,7 +129,6 @@ class NotebookRepository(context: Context) {
         const val PREFS = "yt_to_pc"
         const val KEY_FOLDER_ID = "drive_folder_id"
         const val KEY_FOLDER_NAME = "drive_folder_name"
-        const val KEY_LAST_MUSIC_FOLDER = "last_music_folder"
         const val KEY_WALLPAPER = "default_wallpaper"
         const val KEY_ACCENT = "accent"
         val AccentKeys = setOf("dark-red", "dark-green", "dark-blue", "pink", "purple", "yellow", "orange")

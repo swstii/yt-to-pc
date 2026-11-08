@@ -35,7 +35,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Arrangement
@@ -71,11 +70,9 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.KeyboardArrowUp
-import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Search
@@ -178,12 +175,10 @@ fun YtApp(model: AppViewModel) {
     var pickedSongs by remember { mutableStateOf(emptySet<String>()) }
     var folderSearchOpen by remember { mutableStateOf(false) }
     var shareSearchOpen by remember { mutableStateOf(false) }
-    var queueReady by remember { mutableStateOf(false) }
     val deletePicked = remember { SongDelete() }
     val openFolderSearch = remember { SongDelete() }
     val closeFolderSearch = remember { SongDelete() }
     val closeShareSearch = remember { SongDelete() }
-    val queueNow = remember { SongDelete() }
     val snackbar = remember { SnackbarHostState() }
     val signIn = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
         val data = result.data
@@ -350,9 +345,7 @@ fun YtApp(model: AppViewModel) {
                 screen.text,
                 state.busy,
                 model,
-                onBar = { ready, queue, searching, close ->
-                    if (queueReady != ready) queueReady = ready
-                    queueNow.run = queue
+                onBar = { searching, close ->
                     if (shareSearchOpen != searching) shareSearchOpen = searching
                     closeShareSearch.run = close
                 },
@@ -890,7 +883,7 @@ private fun FolderScreen(
         ) {
             BackToTop(scrolled) { scope.launch { listState.animateScrollToItem(0) } }
             Box(
-                Modifier.size(68.dp).clickable(enabled = !busy) { model.pasteLink(folder.name) },
+                Modifier.size(68.dp).clickable(enabled = !busy) { model.pasteLink() },
                 contentAlignment = Alignment.Center,
             ) {
                 LinkMark(SoftPink, Modifier.size(64.dp))
@@ -1061,7 +1054,7 @@ private fun ShareScreen(
     text: String,
     busy: Boolean,
     model: AppViewModel,
-    onBar: (Boolean, () -> Unit, Boolean, () -> Unit) -> Unit,
+    onBar: (Boolean, () -> Unit) -> Unit,
 ) {
     val parsed = YoutubeLinks.parse(text)
     val target = (parsed as? ParseResult.Found)?.target
@@ -1084,15 +1077,9 @@ private fun ShareScreen(
         menuOpen = false
         focus.clearFocus()
     }
-    val queue: () -> Unit = {
-        selected?.let { model.enqueue(text, it, choice) }
-        Unit
-    }
-    SideEffect {
-        onBar(selected != null && target != null, queue, searching, closeSearch)
-    }
+    SideEffect { onBar(searching, closeSearch) }
     DisposableEffect(Unit) {
-        onDispose { onBar(false, {}, false, {}) }
+        onDispose { onBar(false, {}) }
     }
     BackHandler(enabled = searching) { closeSearch() }
     BackHandler(enabled = creating) { creating = false }
